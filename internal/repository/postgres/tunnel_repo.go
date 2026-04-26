@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -326,29 +325,33 @@ func (r *TunnelRepository) mapToRecord(t *tunnel.ResellerTunnel) *tunnelRecord {
 }
 
 func (r *TunnelRepository) encryptField(value string) []byte {
-	if value == "" || r.crypto == nil {
+	if value == "" {
 		return nil
+	}
+	if r.crypto == nil {
+		return []byte(value)
 	}
 	encrypted, err := r.crypto.Encrypt([]byte(value))
 	if err != nil {
 		r.log.Warn("failed to encrypt field", zap.Error(err))
-		return nil
+		return []byte(value)
 	}
 	return []byte(encrypted)
 }
 
 func (r *TunnelRepository) decryptField(enc []byte, target *string) {
-	if len(enc) == 0 || r.crypto == nil {
+	if len(enc) == 0 {
 		return
 	}
-	decrypted, err := r.crypto.Decrypt(base64.StdEncoding.EncodeToString(enc))
+	if r.crypto == nil {
+		*target = string(enc)
+		return
+	}
+	decrypted, err := r.crypto.Decrypt(string(enc))
 	if err != nil {
-		// Try decoding as raw string (backward compat with base64-stored ciphertext)
-		decrypted, err = r.crypto.Decrypt(string(enc))
-		if err != nil {
-			r.log.Warn("failed to decrypt field", zap.Error(err))
-			return
-		}
+		r.log.Warn("failed to decrypt field, using raw value", zap.Error(err))
+		*target = string(enc)
+		return
 	}
 	*target = string(decrypted)
 }

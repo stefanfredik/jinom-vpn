@@ -8,6 +8,7 @@ VPN tunnel management service for Jinom NMS multi-reseller isolation. Manages Wi
 
 - [Architecture Overview](#architecture-overview)
 - [Prerequisites](#prerequisites)
+- [VPN Infrastructure Setup](#vpn-infrastructure-setup)
 - [Configuration](#configuration)
 - [Development Setup](#development-setup)
 - [Production Deployment](#production-deployment)
@@ -85,6 +86,232 @@ apk add iproute2 wireguard-tools iptables strongswan xl2tpd
 - API service enabled di port `8728` (default)
 - WireGuard package installed (untuk tunnel WireGuard)
 - User dengan hak akses API
+
+---
+
+## VPN Infrastructure Setup
+
+Sebelum menjalankan jinom-vpn, server VPS harus disiapkan dengan package dan konfigurasi VPN.
+
+### Automated Setup (Recommended)
+
+Script `scripts/setup-vpn-infra.sh` mengotomasi seluruh proses:
+
+```bash
+cd /path/to/jinom-vpn
+sudo ./scripts/setup-vpn-infra.sh
+```
+
+Script ini melakukan:
+1. Install semua package (WireGuard, StrongSwan, xl2tpd, ppp, iptables)
+2. Load WireGuard kernel module
+3. Konfigurasi kernel parameter (IP forwarding, rp_filter)
+4. Setup StrongSwan dan xl2tpd base config
+5. Konfigurasi PPP options untuk L2TP
+6. Disable global services (jinom-vpn mengelola per-namespace)
+7. Setup firewall rules
+8. Verifikasi instalasi
+
+### Manual Setup
+
+Jika ingin setup manual atau troubleshooting, ikuti langkah-langkah berikut:
+
+#### 1. Install Packages
+
+```bash
+# Ubuntu/Debian
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    iproute2 \
+    wireguard wireguard-tools \
+    strongswan strongswan-pki libcharon-extra-plugins \
+    xl2tpd ppp \
+    iptables net-tools iputils-ping
+```
+
+#### 2. Load WireGuard Kernel Module
+
+```bash
+# Load module
+sudo modprobe wireguard
+
+# Verify
+lsmod | grep wireguard
+
+# Auto-load on boot
+echo "wireguard" | sudo tee -a /etc/modules
+```
+
+> **Note:** Kernel 5.6+ sudah memiliki WireGuard built-in. Untuk kernel lama, install `wireguard-dkms` dan `linux-headers-$(uname -r)`.
+
+#### 3. Konfigurasi Kernel Parameters
+
+Buat file `/etc/sysctl.d/99-jinom-vpn.conf`:
+
+```bash
+sudo tee /etc/sysctl.d/99-jinom-vpn.conf << 'EOF'
+# Enable IP forwarding untuk VPN tunnel routing
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+
+# Disable ICMP redirects (security)
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+
+# Required untuk L2TP/IPSec NAT traversal
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+EOF
+
+# Apply
+sudo sysctl -p /etc/sysctl.d/99-jinom-vpn.conf
+
+# Verify
+cat /proc/sys/net/ipv4/ip_forward  # harus 1
+```
+
+#### 4. Setup StrongSwan (IPSec)
+
+StrongSwan menyediakan layer IPSec untuk L2TP tunnels.
+
+**Base config** `/etc/ipsec.conf`:
+
+```conf
+config setup
+    charondebug="ike 1, knl 1, cfg 0"
+    uniqueids=no
+
+include /etc/ipsec.d/*.conf
+```
+
+**Secrets file** `/etc/ipsec.secrets`:
+
+```conf
+include /etc/ipsec.d/*.secrets
+```
+
+```bash
+sudo chmod 600 /etc/ipsec.secrets
+sudo mkdir -p /etc/ipsec.d
+sudo chmod 700 /etc/ipsec.d
+```
+
+> jinom-vpn secara dinamis menulis per-tunnel config ke `/etc/ipsec.d/*.conf` dan `/etc/ipsec.d/*.secrets` saat tunnel dibuat.
+
+#### 5. Setup xl2tpd (L2TP)
+
+**Base config** `/etc/xl2tpd/xl2tpd.conf`:
+
+```ini
+[global]
+port = 1701
+```
+
+```bash
+sudo mkdir -p /etc/xl2tpd
+```
+
+> Seperti StrongSwan, jinom-vpn mengelola per-tunnel L2TP config secara dinamis.
+
+#### 6. Konfigurasi PPP Options
+
+Buat `/etc/ppp/options.xl2tpd`:
+
+```
+ipcp-accept-local
+ipcp-accept-remote
+require-mschap-v2
+ms-dns 8.8.8.8
+ms-dns 8.8.4.4
+asyncmap 0
+auth
+crtscts
+lock
+hide-password
+modem
+debug
+name jinom-vpn
+proxyarp
+lcp-echo-interval 30
+lcp-echo-failure 4
+mtu 1400
+mru 1400
+```
+
+#### 7. Disable Global Services
+
+jinom-vpn menjalankan StrongSwan dan xl2tpd per-namespace, bukan secara global:
+
+```bash
+sudo systemctl stop strongswan-starter xl2tpd
+sudo systemctl disable strongswan-starter xl2tpd
+```
+
+#### 8. Firewall Rules
+
+**WireGuard** — port range berdasarkan `51820 + reseller_id`:
+
+```bash
+# UFW
+sudo ufw allow 51821:52074/udp comment "jinom-vpn WireGuard"
+
+# atau iptables
+sudo iptables -A INPUT -p udp --dport 51821:52074 -j ACCEPT
+```
+
+**L2TP/IPSec**:
+
+```bash
+# UFW
+sudo ufw allow 500/udp comment "IKE (IPSec)"
+sudo ufw allow 4500/udp comment "NAT-T (IPSec)"
+sudo ufw allow 1701/udp comment "L2TP"
+
+# atau iptables
+sudo iptables -A INPUT -p udp --dport 500 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 4500 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 1701 -j ACCEPT
+```
+
+Persist iptables rules:
+
+```bash
+sudo apt install -y iptables-persistent
+sudo netfilter-persistent save
+```
+
+#### 9. Verifikasi
+
+```bash
+# Check tools
+wg --version
+ipsec --version
+xl2tpd --version
+ip -V
+
+# Check kernel module
+lsmod | grep wireguard
+
+# Check IP forwarding
+cat /proc/sys/net/ipv4/ip_forward
+
+# Test network namespaces
+sudo ip netns add __test__
+sudo ip netns del __test__
+echo "Network namespaces working!"
+```
+
+### Port Summary
+
+| Port | Protocol | Fungsi |
+|------|----------|--------|
+| `8090` | TCP | jinom-vpn HTTP API |
+| `51821-52074` | UDP | WireGuard tunnels (per-reseller) |
+| `500` | UDP | IKE (IPSec key exchange) |
+| `4500` | UDP | NAT-T (IPSec NAT traversal) |
+| `1701` | UDP | L2TP |
 
 ---
 

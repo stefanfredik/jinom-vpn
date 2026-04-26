@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/jinom/vpn/internal/domain/tunnel"
+	"github.com/jinom/vpn/pkg/mikrotik"
 )
 
 type TunnelService struct {
@@ -208,10 +209,12 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 	}
 
 	status := &TunnelStatus{
-		ID:        t.ID,
-		Status:    t.Status,
-		Namespace: t.Namespace,
-		LastError: t.LastError,
+		ID:             t.ID,
+		Status:         t.Status,
+		Namespace:      t.Namespace,
+		LastError:      t.LastError,
+		MikrotikStatus: "unknown",
+		MikrotikIP:     "0.0.0.0",
 	}
 
 	if t.IsActive() && s.nsSvc.Exists(t.Namespace) {
@@ -219,6 +222,44 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 		out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "1", "-W", "2", peerIP)
 		status.PeerReachable = err == nil
 		_ = out
+	}
+
+	// Try to fetch Mikrotik status
+	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
+	if err == nil {
+		defer client.Close()
+		var path string
+		name := t.Name
+		if t.VPNType == tunnel.VPNTypeWireGuard {
+			path = "/interface/wireguard/print"
+			name = "wg-jinom"
+		} else {
+			path = "/interface/l2tp-client/print"
+			name = "l2tp-jinom"
+		}
+		
+		res, err := client.Run(path, map[string]string{"?name": name})
+		if err == nil && len(res) > 0 {
+			if res[0]["disabled"] == "true" {
+				status.MikrotikStatus = "disabled"
+			} else {
+				if res[0]["running"] == "true" {
+					status.MikrotikStatus = "running"
+				} else {
+					status.MikrotikStatus = "enabled"
+				}
+			}
+		} else {
+			status.MikrotikStatus = "not found"
+		}
+
+		// Fetch IP address in mikrotik
+		ipRes, err := client.Run("/ip/address/print", map[string]string{"?interface": name})
+		if err == nil && len(ipRes) > 0 {
+			status.MikrotikIP = ipRes[0]["address"]
+		}
+	} else {
+		status.MikrotikStatus = "unreachable"
 	}
 
 	return status, nil
@@ -245,11 +286,13 @@ type CreateTunnelRequest struct {
 }
 
 type TunnelStatus struct {
-	ID            uuid.UUID     `json:"id"`
-	Status        tunnel.Status `json:"status"`
-	Namespace     string        `json:"namespace"`
-	LastError     string        `json:"last_error,omitempty"`
-	PeerReachable bool          `json:"peer_reachable"`
+	ID             uuid.UUID     `json:"id"`
+	Status         tunnel.Status `json:"status"`
+	Namespace      string        `json:"namespace"`
+	LastError      string        `json:"last_error,omitempty"`
+	PeerReachable  bool          `json:"peer_reachable"`
+	MikrotikStatus string        `json:"mikrotik_status,omitempty"`
+	MikrotikIP     string        `json:"mikrotik_ip,omitempty"`
 }
 
 func extractIP(cidr string) string {

@@ -61,8 +61,12 @@ func (s *WireGuardService) Setup(t *tunnel.ResellerTunnel) error {
 		return fmt.Errorf("write wireguard config: %w", err)
 	}
 
-	if _, err := s.nsSvc.ExecInNS(ns, "ip", "link", "add", ifName, "type", "wireguard"); err != nil {
+	if err := run("ip", "link", "add", ifName, "type", "wireguard"); err != nil {
 		return fmt.Errorf("create wg interface: %w", err)
+	}
+
+	if err := run("ip", "link", "set", ifName, "netns", ns); err != nil {
+		return fmt.Errorf("move wg to namespace: %w", err)
 	}
 
 	if _, err := s.nsSvc.ExecInNS(ns, "wg", "setconf", ifName, confPath); err != nil {
