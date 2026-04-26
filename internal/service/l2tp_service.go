@@ -98,10 +98,18 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 		runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
 		runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
 		runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", fmt.Sprintf("10.254.%s.0/30", X), "-j", "MASQUERADE")
-		
+
 		runCmd("iptables", "-t", "filter", "-I", "FORWARD", "1", "-d", nsIPNoMask, "-j", "ACCEPT")
 		runCmd("iptables", "-t", "filter", "-I", "FORWARD", "1", "-s", nsIPNoMask, "-j", "ACCEPT")
 	}
+
+	// Clean up old config files before writing new ones
+	connName := fmt.Sprintf("jinom-%s", t.Namespace)
+	s.log.Debug("Cleaning up old config files", zap.String("conn_name", connName))
+	_ = os.Remove(filepath.Join("/etc/ipsec.d", connName+".conf"))
+	_ = os.Remove(filepath.Join("/etc/ipsec.d", connName+".secrets"))
+	_ = os.Remove(filepath.Join("/etc/xl2tpd", t.Namespace+".conf"))
+	time.Sleep(500 * time.Millisecond)
 
 	if err := s.writeIPSecConfig(t); err != nil {
 		return fmt.Errorf("write ipsec config: %w", err)
@@ -109,6 +117,12 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 
 	if err := s.writeXL2TPDConfig(t); err != nil {
 		return fmt.Errorf("write xl2tpd config: %w", err)
+	}
+
+	// Reload IPSec configuration to pick up new credentials
+	if err := s.reloadIPSec(); err != nil {
+		s.log.Warn("Failed to reload ipsec configuration", zap.Error(err))
+		// Continue anyway - startIPSec will handle full restart
 	}
 
 	if err := s.startIPSec(t.Namespace); err != nil {
@@ -119,6 +133,26 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 		return fmt.Errorf("start xl2tpd: %w", err)
 	}
 
+	return nil
+}
+
+func (s *L2TPService) reloadIPSec() error {
+	// Reload IPSec to pick up new configuration without full restart
+	out, err := exec.Command("ipsec", "rereadall").CombinedOutput()
+	if err != nil {
+		s.log.Debug("ipsec rereadall result", zap.Error(err), zap.String("output", string(out)))
+		// Not critical, will be handled by full restart
+		return nil
+	}
+
+	out, err = exec.Command("ipsec", "reload").CombinedOutput()
+	if err != nil {
+		s.log.Debug("ipsec reload result", zap.Error(err), zap.String("output", string(out)))
+		return nil
+	}
+
+	s.log.Debug("IPSec configuration reloaded")
+	time.Sleep(1 * time.Second)
 	return nil
 }
 
@@ -223,17 +257,23 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel) error {
 	connName := fmt.Sprintf("jinom-%s", t.Namespace)
 
+	// IPSec config for L2TP - VPS acts as responder (passive listener)
+	// auto=add means don't auto-initiate, wait for MikroTik to connect
+	// right=RouterIP specifies which endpoint can connect
 	conf := fmt.Sprintf(`conn %s
     authby=secret
-    auto=start
+    auto=add
     type=transport
     left=%%defaultroute
     leftprotoport=17/1701
-    right=%%any
+    right=%s
     rightprotoport=17/1701
-    ike=aes128-sha1-modp1024,aes256-sha1-modp1024!
-    esp=aes128-sha1,aes256-sha1!
-`, connName)
+    keyingtries=3
+    ikelifetime=28800s
+    lifetime=3600s
+    ike=aes128-sha1-modp1024,aes128-md5-modp1024,3des-sha1-modp1024!
+    esp=aes128-sha1,aes128-md5,3des-sha1!
+`, connName, t.RouterIP)
 
 	confPath := filepath.Join("/etc/ipsec.d", connName+".conf")
 	if err := os.MkdirAll("/etc/ipsec.d", 0755); err != nil {

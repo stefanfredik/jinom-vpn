@@ -1,0 +1,41 @@
+                 List of relations
+ Schema |          Name          | Type  |  Owner   
+--------+------------------------+-------+----------
+ public | acs_device_parameters  | table | nms_user
+ public | acs_device_profiles    | table | nms_user
+ public | acs_device_telemetries | table | nms_user
+ public | acs_devices            | table | nms_user
+ public | acs_endpoints          | table | nms_user
+ public | acs_faults             | table | nms_user
+ public | acs_files              | table | nms_user
+ public | acs_preset_executions  | table | nms_user
+ public | acs_presets            | table | nms_user
+ public | acs_tasks              | table | nms_user
+ public | alerts                 | table | nms_user
+ public | api_key_audit_logs     | table | nms_user
+ public | api_keys               | table | nms_user
+ public | batch_action_items     | table | nms_user
+ public | batch_actions          | table | nms_user
+ public | command_idempotency    | table | nms_user
+ public | command_logs           | table | nms_user
+ public | device_health_logs     | table | nms_user
+ public | device_interfaces      | table | nms_user
+ public | device_relationships   | table | nms_user
+ public | device_status_current  | table | nms_user
+ public | device_status_history  | table | nms_user
+ public | device_telemetries     | table | nms_user
+ public | devices                | table | nms_user
+ public | inbound_webhooks       | table | nms_user
+ public | integration_configs    | table | nms_user
+ public | interface_traffic      | table | nms_user
+ public | metrics                | table | nms_user
+ public | notification_channels  | table | nms_user
+ public | odp_topology           | table | nms_user
+ public | reseller_tunnels       | table | nms_user
+ public | schema_migrations      | table | nms_user
+ public | sla_reports            | table | nms_user
+ public | system_settings        | table | nms_user
+ public | tasks                  | table | nms_user
+ public | users                  | table | nms_user
+(36 rows)
+

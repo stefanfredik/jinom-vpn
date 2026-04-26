@@ -24,11 +24,17 @@ func (s *ProvisionerService) Provision(t *tunnel.ResellerTunnel, vpsPublicIP str
 		return fmt.Errorf("invalid VPS public IP: %q - must set VPS_PUBLIC_IP environment variable to a valid public IP address", vpsPublicIP)
 	}
 
+	// Validate tunnel has credentials before provisioning
+	if t.PSK == "" {
+		return fmt.Errorf("tunnel PSK not set - cannot provision without IPSec pre-shared key")
+	}
+
 	s.log.Info("Provisioning MikroTik router",
 		zap.String("router_ip", t.RouterIP),
 		zap.Int("ros_version", t.RouterOSVersion),
 		zap.String("vpn_type", string(t.VPNType)),
 		zap.String("vps_public_ip", vpsPublicIP),
+		zap.String("psk_configured", "yes"),
 	)
 
 	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
@@ -108,20 +114,57 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 }
 
 func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.ResellerTunnel, vpsIP string) error {
-	s.log.Debug("L2TP provisioning parameters",
+	// Validate L2TP credentials
+	if t.L2TPUsername == "" || t.L2TPPassword == "" || t.PSK == "" {
+		return fmt.Errorf("incomplete L2TP configuration: username=%q, password=%q, psk=%q",
+			t.L2TPUsername, t.L2TPPassword, t.PSK)
+	}
+
+	s.log.Info("L2TP provisioning parameters",
 		zap.String("username", t.L2TPUsername),
 		zap.String("vps_ip", vpsIP),
+		zap.String("psk_first_chars", t.PSK[:8]+"***"),
 	)
 
-	// Find and remove existing interface
+	// Find and remove existing interface - MUST disable first to allow proper cleanup
 	res, err := c.Run("/interface/l2tp-client/print", map[string]string{"?name": "l2tp-jinom"})
 	if err == nil && len(res) > 0 {
-		s.log.Info("Removing existing L2TP interface")
+		interfaceID := res[0][".id"]
+		s.log.Info("Found existing L2TP interface, disabling first", zap.String("id", interfaceID))
+
+		// First disable the interface to allow tunnel to close properly
+		if disableErr := c.RunCommand(mikrotik.Command{
+			Path:   "/interface/l2tp-client/set",
+			Params: map[string]string{".id": interfaceID, "disabled": "yes"},
+		}); disableErr != nil {
+			s.log.Warn("Failed to disable L2TP interface", zap.Error(disableErr))
+		}
+
+		// Wait for tunnel to terminate gracefully
+		s.log.Info("Waiting for tunnel termination...")
+		time.Sleep(2 * time.Second)
+
+		// Now remove the interface
 		if removeErr := c.RunCommand(mikrotik.Command{
 			Path:   "/interface/l2tp-client/remove",
-			Params: map[string]string{".id": res[0][".id"]},
+			Params: map[string]string{".id": interfaceID},
 		}); removeErr != nil {
-			s.log.Warn("Failed to remove existing L2TP interface", zap.Error(removeErr))
+			s.log.Error("Failed to remove existing L2TP interface", zap.Error(removeErr))
+			return fmt.Errorf("cleanup l2tp interface: %w", removeErr)
+		}
+		s.log.Info("Old L2TP interface removed successfully")
+		time.Sleep(1 * time.Second)
+	}
+
+	// Find and remove existing IP address
+	resIp, err := c.Run("/ip/address/print", map[string]string{"?interface": "l2tp-jinom"})
+	if err == nil && len(resIp) > 0 {
+		s.log.Info("Removing existing L2TP IP address")
+		if removeErr := c.RunCommand(mikrotik.Command{
+			Path:   "/ip/address/remove",
+			Params: map[string]string{".id": resIp[0][".id"]},
+		}); removeErr != nil {
+			s.log.Warn("Failed to remove existing L2TP IP", zap.Error(removeErr))
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -136,18 +179,7 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 		}); removeErr != nil {
 			s.log.Warn("Failed to remove existing route", zap.Error(removeErr))
 		}
-	}
-
-	// Find and remove existing IP address
-	resIp, err := c.Run("/ip/address/print", map[string]string{"?interface": "l2tp-jinom"})
-	if err == nil && len(resIp) > 0 {
-		s.log.Info("Removing existing L2TP IP address")
-		if removeErr := c.RunCommand(mikrotik.Command{
-			Path:   "/ip/address/remove",
-			Params: map[string]string{".id": resIp[0][".id"]},
-		}); removeErr != nil {
-			s.log.Warn("Failed to remove existing L2TP IP", zap.Error(removeErr))
-		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Create L2TP client interface
