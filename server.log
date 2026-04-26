@@ -1,0 +1,33 @@
+2026-04-26T06:04:08.764Z	[34mINFO[0m	server/main.go:32	Starting jinom-vpn	{"env": "development", "listen": ":8090"}
+2026-04-26T06:04:08.778Z	[34mINFO[0m	database/postgres.go:41	Connected to PostgreSQL	{"host": "127.0.0.1", "port": 15432, "db": "nms_db"}
+2026-04-26T06:04:08.778Z	[31mERROR[0m	server/main.go:47	Failed to initialize crypto	{"error": "invalid base64 key: illegal base64 data at input byte 5"}
+main.main
+	/home/homenet/dev/jinom-project/jinom-vpn/cmd/server/main.go:47
+runtime.main
+	/home/homenet/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/proc.go:283
+2026-04-26T06:04:08.778Z	[33mWARN[0m	server/main.go:66	VPS_PUBLIC_IP not set, MikroTik provisioning will use 0.0.0.0
+main.main
+	/home/homenet/dev/jinom-project/jinom-vpn/cmd/server/main.go:66
+runtime.main
+	/home/homenet/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/proc.go:283
+2026-04-26T06:04:08.778Z	[34mINFO[0m	service/health_monitor_service.go:47	Health monitor started	{"interval": "30s"}
+
+ ┌───────────────────────────────────────────────────┐ 
+ │                   Fiber v2.52.6                   │ 
+ │               http://127.0.0.1:8090               │ 
+ │       (bound on host 0.0.0.0 and port 8090)       │ 
+ │                                                   │ 
+ │ Handlers ............ 16  Processes ........... 1 │ 
+ │ Prefork ....... Disabled  PID ........... 1545372 │ 
+ └───────────────────────────────────────────────────┘ 
+
+2026-04-26T06:10:38.783Z	[31mERROR[0m	service/health_monitor_service.go:74	Failed to fetch active tunnels	{"error": "find active tunnels: dial tcp 127.0.0.1:15432: connect: connection refused"}
+github.com/jinom/vpn/internal/service.(*HealthMonitorService).checkAllTunnels
+	/home/homenet/dev/jinom-project/jinom-vpn/internal/service/health_monitor_service.go:74
+github.com/jinom/vpn/internal/service.(*HealthMonitorService).Start.func1
+	/home/homenet/dev/jinom-project/jinom-vpn/internal/service/health_monitor_service.go:58
+2026-04-26T06:11:08.787Z	[31mERROR[0m	service/health_monitor_service.go:74	Failed to fetch active tunnels	{"error": "find active tunnels: dial tcp 127.0.0.1:15432: connect: connection refused"}
+github.com/jinom/vpn/internal/service.(*HealthMonitorService).checkAllTunnels
+	/home/homenet/dev/jinom-project/jinom-vpn/internal/service/health_monitor_service.go:74
+github.com/jinom/vpn/internal/service.(*HealthMonitorService).Start.func1
+	/home/homenet/dev/jinom-project/jinom-vpn/internal/service/health_monitor_service.go:58
