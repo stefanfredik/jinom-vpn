@@ -60,10 +60,13 @@ func main() {
 	l2tpSvc := service.NewL2TPService(nsSvc, zapLogger)
 	provisionerSvc := service.NewProvisionerService(zapLogger)
 
-	vpsPublicIP := os.Getenv("VPS_PUBLIC_IP")
+	vpsPublicIP := cfg.VPSPublicIP
 	if vpsPublicIP == "" {
-		vpsPublicIP = "0.0.0.0"
-		zapLogger.Warn("VPS_PUBLIC_IP not set, MikroTik provisioning will use 0.0.0.0")
+		zapLogger.Warn("⚠️  VPS_PUBLIC_IP not configured in .env file! MikroTik provisioning will FAIL if attempted.")
+		zapLogger.Warn("Update .env file: VPS_PUBLIC_IP=<your-public-ip>")
+		vpsPublicIP = "0.0.0.0" // Will be validated at provision time
+	} else {
+		zapLogger.Info("VPS_PUBLIC_IP configured", zap.String("ip", vpsPublicIP))
 	}
 
 	tunnelSvc := service.NewTunnelService(

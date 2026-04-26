@@ -51,22 +51,48 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 		vethHost := fmt.Sprintf("vh-%s", X)
 		vethNs := fmt.Sprintf("vn-%s", X)
 
-		runCmd := func(name string, args ...string) {
+		runCmd := func(name string, args ...string) error {
 			out, err := exec.Command(name, args...).CombinedOutput()
 			if err != nil {
 				s.log.Warn("Command failed", zap.String("cmd", name), zap.Strings("args", args), zap.Error(err), zap.String("out", string(out)))
+				return err
 			}
+			return nil
 		}
 
-		runCmd("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNs)
-		runCmd("ip", "link", "set", vethNs, "netns", t.Namespace)
+		// Clean up any existing veth interface from previous failed attempts
+		s.log.Debug("Cleaning up existing veth interface", zap.String("veth_host", vethHost))
+		exec.Command("ip", "link", "del", vethHost).CombinedOutput()
+		time.Sleep(100 * time.Millisecond)
 
-		runCmd("ip", "addr", "add", hostIP, "dev", vethHost)
-		runCmd("ip", "link", "set", vethHost, "up")
+		// Create new veth interface
+		if err := runCmd("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNs); err != nil {
+			return fmt.Errorf("failed to create veth interface: %w", err)
+		}
 
-		s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNs)
-		s.nsSvc.ExecInNS(t.Namespace, "ip", "link", "set", vethNs, "up")
-		s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", "default", "via", fmt.Sprintf("10.254.%s.1", X))
+		// Move veth peer to namespace
+		if err := runCmd("ip", "link", "set", vethNs, "netns", t.Namespace); err != nil {
+			return fmt.Errorf("failed to move veth to namespace: %w", err)
+		}
+
+		// Configure host side veth
+		if err := runCmd("ip", "addr", "add", hostIP, "dev", vethHost); err != nil {
+			return fmt.Errorf("failed to add host veth address: %w", err)
+		}
+		if err := runCmd("ip", "link", "set", vethHost, "up"); err != nil {
+			return fmt.Errorf("failed to bring up host veth: %w", err)
+		}
+
+		// Configure namespace side veth
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNs); err != nil {
+			return fmt.Errorf("failed to add namespace veth address: %w", err)
+		}
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "link", "set", vethNs, "up"); err != nil {
+			return fmt.Errorf("failed to bring up namespace veth: %w", err)
+		}
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", "default", "via", fmt.Sprintf("10.254.%s.1", X)); err != nil {
+			return fmt.Errorf("failed to add default route in namespace: %w", err)
+		}
 
 		runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
 		runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")

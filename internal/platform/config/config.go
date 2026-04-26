@@ -5,8 +5,9 @@ import (
 )
 
 type Config struct {
-	AppEnv     string `mapstructure:"APP_ENV"`
-	ListenAddr string `mapstructure:"LISTEN_ADDR"`
+	AppEnv      string `mapstructure:"APP_ENV"`
+	ListenAddr  string `mapstructure:"LISTEN_ADDR"`
+	VPSPublicIP string `mapstructure:"VPS_PUBLIC_IP"`
 
 	Database DatabaseConfig `mapstructure:",squash"`
 	Security SecurityConfig `mapstructure:",squash"`
@@ -34,6 +35,7 @@ func LoadConfig(path string) *Config {
 
 	viper.SetDefault("APP_ENV", "development")
 	viper.SetDefault("LISTEN_ADDR", ":8090")
+	viper.SetDefault("VPS_PUBLIC_IP", "")
 	viper.SetDefault("DB_HOST", "localhost")
 	viper.SetDefault("DB_PORT", 5432)
 	viper.SetDefault("DB_USER", "jinom")
@@ -45,6 +47,7 @@ func LoadConfig(path string) *Config {
 
 	_ = viper.BindEnv("APP_ENV")
 	_ = viper.BindEnv("LISTEN_ADDR")
+	_ = viper.BindEnv("VPS_PUBLIC_IP")
 	_ = viper.BindEnv("DB_HOST")
 	_ = viper.BindEnv("DB_PORT")
 	_ = viper.BindEnv("DB_USER")

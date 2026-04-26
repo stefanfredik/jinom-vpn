@@ -19,10 +19,16 @@ func NewProvisionerService(log *zap.Logger) *ProvisionerService {
 }
 
 func (s *ProvisionerService) Provision(t *tunnel.ResellerTunnel, vpsPublicIP string) error {
+	// Validate VPS IP address
+	if vpsPublicIP == "" || vpsPublicIP == "0.0.0.0" || vpsPublicIP == "127.0.0.1" {
+		return fmt.Errorf("invalid VPS public IP: %q - must set VPS_PUBLIC_IP environment variable to a valid public IP address", vpsPublicIP)
+	}
+
 	s.log.Info("Provisioning MikroTik router",
 		zap.String("router_ip", t.RouterIP),
 		zap.Int("ros_version", t.RouterOSVersion),
 		zap.String("vpn_type", string(t.VPNType)),
+		zap.String("vps_public_ip", vpsPublicIP),
 	)
 
 	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
@@ -102,33 +108,58 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 }
 
 func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.ResellerTunnel, vpsIP string) error {
+	s.log.Debug("L2TP provisioning parameters",
+		zap.String("username", t.L2TPUsername),
+		zap.String("vps_ip", vpsIP),
+	)
+
 	// Find and remove existing interface
 	res, err := c.Run("/interface/l2tp-client/print", map[string]string{"?name": "l2tp-jinom"})
 	if err == nil && len(res) > 0 {
-		c.Run("/interface/l2tp-client/remove", map[string]string{".id": res[0][".id"]})
+		s.log.Info("Removing existing L2TP interface")
+		if removeErr := c.RunCommand(mikrotik.Command{
+			Path:   "/interface/l2tp-client/remove",
+			Params: map[string]string{".id": res[0][".id"]},
+		}); removeErr != nil {
+			s.log.Warn("Failed to remove existing L2TP interface", zap.Error(removeErr))
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Find and remove existing route
 	resRoute, err := c.Run("/ip/route/print", map[string]string{"?comment": "jinom-nms"})
 	if err == nil && len(resRoute) > 0 {
-		c.Run("/ip/route/remove", map[string]string{".id": resRoute[0][".id"]})
+		s.log.Info("Removing existing route")
+		if removeErr := c.RunCommand(mikrotik.Command{
+			Path:   "/ip/route/remove",
+			Params: map[string]string{".id": resRoute[0][".id"]},
+		}); removeErr != nil {
+			s.log.Warn("Failed to remove existing route", zap.Error(removeErr))
+		}
 	}
 
 	// Find and remove existing IP address
 	resIp, err := c.Run("/ip/address/print", map[string]string{"?interface": "l2tp-jinom"})
 	if err == nil && len(resIp) > 0 {
-		c.Run("/ip/address/remove", map[string]string{".id": resIp[0][".id"]})
+		s.log.Info("Removing existing L2TP IP address")
+		if removeErr := c.RunCommand(mikrotik.Command{
+			Path:   "/ip/address/remove",
+			Params: map[string]string{".id": resIp[0][".id"]},
+		}); removeErr != nil {
+			s.log.Warn("Failed to remove existing L2TP IP", zap.Error(removeErr))
+		}
 	}
 
+	// Create L2TP client interface
 	commands := []mikrotik.Command{
 		{
 			Path: "/interface/l2tp-client/add",
 			Params: map[string]string{
 				"name":         "l2tp-jinom",
-				"connect-to":  vpsIP,
-				"user":        t.L2TPUsername,
-				"password":    t.L2TPPassword,
-				"use-ipsec":   "yes",
+				"connect-to":   vpsIP,
+				"user":         t.L2TPUsername,
+				"password":     t.L2TPPassword,
+				"use-ipsec":    "yes",
 				"ipsec-secret": t.PSK,
 				"disabled":     "no",
 			},
@@ -137,6 +168,11 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 
 	for _, cmd := range commands {
 		if err := c.RunCommand(cmd); err != nil {
+			s.log.Error("Failed to create L2TP interface",
+				zap.String("path", cmd.Path),
+				zap.Error(err),
+				zap.Any("params", cmd.Params),
+			)
 			return fmt.Errorf("provision l2tp cmd %s: %w", cmd.Path, err)
 		}
 	}
@@ -144,6 +180,21 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 	// Give Mikrotik time to register the new interface
 	time.Sleep(2 * time.Second)
 
+	// Verify that the interface was created successfully
+	verifyRes, verifyErr := c.Run("/interface/l2tp-client/print", map[string]string{"?name": "l2tp-jinom"})
+	if verifyErr != nil || len(verifyRes) == 0 {
+		s.log.Error("L2TP interface not found after creation",
+			zap.Error(verifyErr),
+			zap.Int("result_count", len(verifyRes)),
+		)
+		return fmt.Errorf("l2tp interface creation verification failed: %w", verifyErr)
+	}
+
+	s.log.Info("L2TP interface created successfully",
+		zap.Any("interface_status", verifyRes[0]),
+	)
+
+	// Add route to tunnel
 	errRoute := c.RunCommand(mikrotik.Command{
 		Path: "/ip/route/add",
 		Params: map[string]string{
@@ -153,7 +204,10 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 		},
 	})
 	if errRoute != nil {
-		s.log.Warn("Failed to add route, but continuing", zap.Error(errRoute))
+		s.log.Error("Failed to add route to L2TP interface",
+			zap.Error(errRoute),
+		)
+		// Don't fail on route error - interface is created, route can be added manually
 	}
 
 	return nil

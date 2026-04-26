@@ -12,8 +12,8 @@ type Command struct {
 }
 
 type Client struct {
-	conn  *routeros.Client
-	isV7  bool
+	conn *routeros.Client
+	isV7 bool
 }
 
 func NewClient(address, username, password string, isV7 bool) (*Client, error) {
@@ -47,7 +47,12 @@ func (c *Client) RunCommand(cmd Command) error {
 func (c *Client) Run(path string, params map[string]string) ([]map[string]string, error) {
 	args := []string{path}
 	for k, v := range params {
-		args = append(args, fmt.Sprintf("=%s=%s", k, v))
+		// Query parameters start with ?, set parameters start with =
+		if k[0] == '?' {
+			args = append(args, fmt.Sprintf("%s=%s", k, v))
+		} else {
+			args = append(args, fmt.Sprintf("=%s=%s", k, v))
+		}
 	}
 
 	reply, err := c.conn.RunArgs(args)
