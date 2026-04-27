@@ -65,9 +65,12 @@ func (s *TunnelService) Create(ctx context.Context, req CreateTunnelRequest) (*t
 
 	t.GenerateNamespace()
 
-	tunnelIdx := s.allocateTunnelIndex(t.ResellerID)
-	t.ServerIPAddress = fmt.Sprintf("10.250.%d.1/30", tunnelIdx)
-	t.ClientIPAddress = fmt.Sprintf("10.250.%d.2/30", tunnelIdx)
+	tunnelIdx, err := s.repo.NextTunnelIndex(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("allocate tunnel index: %w", err)
+	}
+	t.TunnelIndex = tunnelIdx
+	t.ServerIPAddress, t.ClientIPAddress = indexToSubnet(tunnelIdx)
 
 	if t.VPNType == tunnel.VPNTypeWireGuard {
 		serverPriv, serverPub, err := s.wgSvc.GenerateKeyPair()
@@ -269,8 +272,12 @@ func (s *TunnelService) setError(ctx context.Context, id uuid.UUID, err error) {
 	_ = s.repo.UpdateStatus(ctx, id, tunnel.StatusError, err.Error())
 }
 
-func (s *TunnelService) allocateTunnelIndex(resellerID int64) int {
-	return int(resellerID % 254) + 1
+func indexToSubnet(index int) (serverIP, clientIP string) {
+	a := index / 64
+	b := (index % 64) * 4
+	serverIP = fmt.Sprintf("10.250.%d.%d/30", a, b+1)
+	clientIP = fmt.Sprintf("10.250.%d.%d/30", a, b+2)
+	return
 }
 
 type CreateTunnelRequest struct {

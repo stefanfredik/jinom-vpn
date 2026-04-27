@@ -35,12 +35,13 @@ var (
 )
 
 type ResellerTunnel struct {
-	ID         uuid.UUID
-	ResellerID int64
-	CompanyID  int64
-	Name       string
-	VPNType    VPNType
-	Namespace  string
+	ID          uuid.UUID
+	ResellerID  int64
+	CompanyID   int64
+	Name        string
+	VPNType     VPNType
+	Namespace   string
+	TunnelIndex int
 
 	ServerPublicKey  string
 	ServerPrivateKey string

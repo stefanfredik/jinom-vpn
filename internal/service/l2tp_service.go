@@ -40,20 +40,12 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 	s.log.Info("Setting up L2TP/IPSec tunnel",
 		zap.String("namespace", t.Namespace),
 		zap.String("tunnel", t.Name),
+		zap.Int("tunnel_index", t.TunnelIndex),
 	)
 
-	clientIP := stripCIDR(t.ClientIPAddress)
-	octets := strings.Split(clientIP, ".")
-	if len(octets) != 4 {
-		return fmt.Errorf("invalid client IP: %s", t.ClientIPAddress)
-	}
-
-	X := octets[2]
-	hostIP := fmt.Sprintf("10.254.%s.1/30", X)
-	nsIP := fmt.Sprintf("10.254.%s.2/30", X)
-	nsIPNoMask := fmt.Sprintf("10.254.%s.2", X)
-	vethHost := fmt.Sprintf("vh-%s", X)
-	vethNs := fmt.Sprintf("vn-%s", X)
+	hostIP, nsIP, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+	vethNs := fmt.Sprintf("vn-%d", t.TunnelIndex)
 
 	runCmd := func(name string, args ...string) error {
 		out, err := exec.Command(name, args...).CombinedOutput()
@@ -86,12 +78,14 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 	if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "link", "set", vethNs, "up"); err != nil {
 		return fmt.Errorf("failed to bring up namespace veth: %w", err)
 	}
-	if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", "default", "via", fmt.Sprintf("10.254.%s.1", X)); err != nil {
+	gwIP, _, _, _ := indexToVethIPs(t.TunnelIndex)
+	gwIPNoMask := stripCIDR(gwIP)
+	if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", "default", "via", gwIPNoMask); err != nil {
 		return fmt.Errorf("failed to add default route in namespace: %w", err)
 	}
 
-	s.cleanupRouting(t.RouterIP, nsIPNoMask, X, t.ClientIPAddress)
-	if err := s.setupRouting(runCmd, t, nsIPNoMask, X, vethHost, vethNs); err != nil {
+	s.cleanupRouting(t.RouterIP, nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
+	if err := s.setupRouting(runCmd, t, nsIPNoMask, t.TunnelIndex, vethHost, vethNs); err != nil {
 		return fmt.Errorf("setup routing: %w", err)
 	}
 
@@ -115,6 +109,16 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 	return nil
 }
 
+func indexToVethIPs(index int) (hostIP, nsIP, nsIPNoMask, subnet string) {
+	a := index / 64
+	b := (index % 64) * 4
+	hostIP = fmt.Sprintf("10.254.%d.%d/30", a, b+1)
+	nsIP = fmt.Sprintf("10.254.%d.%d/30", a, b+2)
+	nsIPNoMask = fmt.Sprintf("10.254.%d.%d", a, b+2)
+	subnet = fmt.Sprintf("10.254.%d.%d/30", a, b)
+	return
+}
+
 func (s *L2TPService) deleteRule(args ...string) {
 	for {
 		if exec.Command("iptables", args...).Run() != nil {
@@ -123,18 +127,12 @@ func (s *L2TPService) deleteRule(args ...string) {
 	}
 }
 
-func (s *L2TPService) routeTableID(octet string) string {
-	return fmt.Sprintf("1%s", octet)
+func (s *L2TPService) routeTableID(index int) string {
+	return fmt.Sprintf("%d", 1000+index)
 }
 
-func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask, octet, clientIP string) {
-	// Derive baseIP from nsIPNoMask (assumes nsIPNoMask is x.y.z.2)
-	ipParts := strings.Split(nsIPNoMask, ".")
-	if len(ipParts) != 4 {
-		return
-	}
-	baseIP := fmt.Sprintf("%s.%s.%s", ipParts[0], ipParts[1], ipParts[2])
-	subnet := fmt.Sprintf("%s.0/30", baseIP)
+func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask string, index int, clientIP string) {
+	_, _, _, subnet := indexToVethIPs(index)
 
 	// Cleanup DNAT rules for IPSec and L2TP forwarding to namespace
 	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
@@ -153,7 +151,7 @@ func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask, octet, clientIP strin
 	s.deleteRule("-t", "filter", "-D", "FORWARD", "-s", nsIPNoMask, "-j", "ACCEPT")
 
 	// Cleanup legacy policy routing rules from previous versions
-	tableID := s.routeTableID(octet)
+	tableID := s.routeTableID(index)
 	for {
 		if exec.Command("ip", "rule", "del", "from", routerIP, "lookup", tableID).Run() != nil {
 			break
@@ -171,8 +169,8 @@ func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask, octet, clientIP strin
 	exec.Command("conntrack", "-D", "-d", routerIP).Run()
 }
 
-func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunnel.ResellerTunnel, nsIPNoMask, octet, vethHost, vethNs string) error {
-	subnet := fmt.Sprintf("10.254.%s.0/30", octet)
+func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunnel.ResellerTunnel, nsIPNoMask string, index int, vethHost, vethNs string) error {
+	_, _, _, subnet := indexToVethIPs(index)
 
 	// s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", s.vpsPublicIP+"/32", "dev", vethNs)
 
@@ -286,17 +284,11 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	_ = s.removeChapSecrets(t.Namespace)
 	s.stopIPSecInNS(t.Namespace, s.ipsecConfDir(t.Namespace))
 
-	clientIP := stripCIDR(t.ClientIPAddress)
-	octets := strings.Split(clientIP, ".")
-	if len(octets) == 4 {
-		X := octets[2]
-		baseIP := fmt.Sprintf("%s.%s.%s", octets[0], octets[1], octets[2])
-		nsIPNoMask := fmt.Sprintf("%s.2", baseIP)
-		vethHost := fmt.Sprintf("vh-%s", X)
+	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
 
-		s.cleanupRouting(t.RouterIP, nsIPNoMask, X, t.ClientIPAddress)
-		exec.Command("ip", "link", "del", vethHost).CombinedOutput()
-	}
+	s.cleanupRouting(t.RouterIP, nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
+	exec.Command("ip", "link", "del", vethHost).CombinedOutput()
 
 	confDir := s.ipsecConfDir(t.Namespace)
 	_ = os.Remove(filepath.Join(confDir, "jinom-"+t.Namespace+".conf"))

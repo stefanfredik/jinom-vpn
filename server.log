@@ -1,0 +1,30 @@
+nohup: ignoring input
+2026-04-27T07:47:34.077Z	[34mINFO[0m	server/main.go:32	Starting jinom-vpn	{"env": "development", "listen": ":8090"}
+2026-04-27T07:47:34.093Z	[34mINFO[0m	database/postgres.go:41	Connected to PostgreSQL	{"host": "127.0.0.1", "port": 15432, "db": "nms_db"}
+2026-04-27T07:47:34.093Z	[34mINFO[0m	server/main.go:50	Crypto service initialized
+2026-04-27T07:47:34.093Z	[34mINFO[0m	server/main.go:69	VPS_PUBLIC_IP configured	{"ip": "10.70.103.56"}
+2026-04-27T07:47:34.094Z	[34mINFO[0m	service/health_monitor_service.go:47	Health monitor started	{"interval": "30s"}
+
+ ┌───────────────────────────────────────────────────┐ 
+ │                   Fiber v2.52.6                   │ 
+ │               http://127.0.0.1:8090               │ 
+ │       (bound on host 0.0.0.0 and port 8090)       │ 
+ │                                                   │ 
+ │ Handlers ............ 16  Processes ........... 1 │ 
+ │ Prefork ....... Disabled  PID ............ 126159 │ 
+ └───────────────────────────────────────────────────┘ 
+
+2026-04-27T07:47:51.965Z	[34mINFO[0m	service/provisioner_service.go:32	Provisioning MikroTik router	{"router_ip": "10.70.94.190", "ros_version": 6, "vpn_type": "l2tp", "vps_public_ip": "10.70.103.56", "psk_configured": "yes"}
+2026-04-27T07:47:51.971Z	[34mINFO[0m	service/provisioner_service.go:123	L2TP provisioning parameters	{"username": "jinom-res-333", "vps_ip": "10.70.103.56", "psk_first_chars": "X3jLlzhT***"}
+2026-04-27T07:47:51.973Z	[34mINFO[0m	service/provisioner_service.go:133	Found existing L2TP interface, disabling first	{"id": "*24"}
+2026-04-27T07:47:51.975Z	[34mINFO[0m	service/provisioner_service.go:144	Waiting for tunnel termination...
+2026-04-27T07:47:53.980Z	[34mINFO[0m	service/provisioner_service.go:155	Old L2TP interface removed successfully
+2026-04-27T07:47:54.983Z	[34mINFO[0m	service/provisioner_service.go:175	Removing existing route
+2026-04-27T07:47:57.600Z	[34mINFO[0m	service/provisioner_service.go:225	L2TP interface created successfully	{"interface_status": {".id":"*25","add-default-route":"false","allow":"pap,chap,mschap1,mschap2","allow-fast-path":"false","connect-to":"10.70.103.56","dial-on-demand":"false","disabled":"false","ipsec-secret":"X3jLlzhTTEfPnXJJWX0Lfm5aDkYR8VGY","keepalive-timeout":"60","max-mru":"1450","max-mtu":"1450","mrru":"disabled","name":"l2tp-jinom","password":"bQq3GeE8B2nnwnu0Smy3DQJK","profile":"default-encryption","running":"false","use-ipsec":"true","use-peer-dns":"no","user":"jinom-res-333"}}
+2026-04-27T07:47:57.705Z	[34mINFO[0m	service/tunnel_service.go:189	Tunnel provisioned to MikroTik	{"id": "ab09121d-d108-4d68-af88-e45bd707d729"}
+2026-04-27T07:47:59.788Z	[34mINFO[0m	service/tunnel_service.go:119	Activating tunnel	{"id": "ab09121d-d108-4d68-af88-e45bd707d729", "namespace": "ns-res-333"}
+2026-04-27T07:47:59.793Z	[34mINFO[0m	service/namespace_service.go:19	Creating network namespace	{"namespace": "ns-res-333"}
+2026-04-27T07:47:59.807Z	[34mINFO[0m	service/l2tp_service.go:40	Setting up L2TP/IPSec tunnel	{"namespace": "ns-res-333", "tunnel": "mantap", "tunnel_index": 0}
+2026-04-27T07:48:02.738Z	[34mINFO[0m	service/l2tp_service.go:222	IPSec status after start	{"namespace": "ns-res-333", "status": "Status of IKE charon daemon (strongSwan 5.9.13, Linux 6.8.0-101-generic, x86_64):\n  uptime: 2 seconds, since Apr 27 07:48:00 2026\n  malloc: sbrk 2572288, mmap 0, used 661296, free 1910992\n  worker threads: 11 of 16 idle, 5/0/0/0 working, job queue: 0/0/0/0, scheduled: 0\n  loaded plugins: charon aesni aes rc2 sha2 sha1 md5 mgf1 random nonce x509 revocation constraints pubkey pkcs1 pkcs7 pkcs12 pgp dnskey sshkey pem openssl pkcs8 fips-prf gmp agent xcbc hmac kdf gcm drbg attr kernel-netlink resolve socket-default connmark forecast farp stroke updown eap-identity eap-aka eap-md5 eap-gtc eap-mschapv2 eap-dynamic eap-radius eap-tls eap-ttls eap-peap eap-tnc xauth-generic xauth-eap xauth-pam tnc-tnccs dhcp lookip error-notify certexpire led addrblock unity counters\nListening IP addresses:\n  10.254.0.2\nConnections:\njinom-ns-res-222:  10.254.222.2...10.70.94.190  IKEv1/2\njinom-ns-res-222:   local:  [10.70.103.56] uses pre-shared key authentication\njinom-ns-res-222:   remote: [10.70.94.190] uses pre-shared key authentication\njinom-ns-res-222:   child:  dynamic === dynamic TRANSPORT\njinom-ns-res-333:  10.254.0.2...10.70.94.190  IKEv1/2\njinom-ns-res-333:   local:  [10.70.103.56] uses pre-shared key authentication\njinom-ns-res-333:   remote: [10.70.94.190] uses pre-shared key authentication\njinom-ns-res-333:   child:  dynamic === dynamic TRANSPORT\nSecurity Associations (0 up, 0 connecting):\n  none\n"}
+2026-04-27T07:48:03.525Z	[34mINFO[0m	service/l2tp_service.go:259	xl2tpd started	{"namespace": "ns-res-333", "pid_file": "/run/xl2tpd-ns-res-333.pid"}
+2026-04-27T07:48:03.533Z	[34mINFO[0m	service/tunnel_service.go:149	Tunnel activated	{"id": "ab09121d-d108-4d68-af88-e45bd707d729"}

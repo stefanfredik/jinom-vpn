@@ -16,12 +16,13 @@ import (
 )
 
 type tunnelRecord struct {
-	ID         uuid.UUID `db:"id"`
-	ResellerID int64     `db:"reseller_id"`
-	CompanyID  int64     `db:"company_id"`
-	Name       string    `db:"name"`
-	VPNType    string    `db:"vpn_type"`
-	Namespace  string    `db:"namespace"`
+	ID          uuid.UUID    `db:"id"`
+	ResellerID  int64        `db:"reseller_id"`
+	CompanyID   int64        `db:"company_id"`
+	Name        string       `db:"name"`
+	VPNType     string       `db:"vpn_type"`
+	Namespace   string       `db:"namespace"`
+	TunnelIndex sql.NullInt32 `db:"tunnel_index"`
 
 	ServerPublicKey    sql.NullString `db:"server_public_key"`
 	ServerPrivateKeyEnc []byte        `db:"server_private_key_enc"`
@@ -173,14 +174,14 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 
 	query := `
 		INSERT INTO reseller_tunnels (
-			id, reseller_id, company_id, name, vpn_type, namespace,
+			id, reseller_id, company_id, name, vpn_type, namespace, tunnel_index,
 			server_public_key, server_private_key_enc, server_listen_port, server_ip_address,
 			client_public_key, client_ip_address, client_endpoint,
 			l2tp_username, l2tp_password_enc, psk_enc,
 			router_ip, router_username, router_password_enc, routeros_version,
 			monitoring_subnets, status, last_error, created_at, updated_at
 		) VALUES (
-			:id, :reseller_id, :company_id, :name, :vpn_type, :namespace,
+			:id, :reseller_id, :company_id, :name, :vpn_type, :namespace, :tunnel_index,
 			:server_public_key, :server_private_key_enc, :server_listen_port, :server_ip_address,
 			:client_public_key, :client_ip_address, :client_endpoint,
 			:l2tp_username, :l2tp_password_enc, :psk_enc,
@@ -189,6 +190,7 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
+			tunnel_index = EXCLUDED.tunnel_index,
 			server_public_key = EXCLUDED.server_public_key,
 			server_private_key_enc = EXCLUDED.server_private_key_enc,
 			server_listen_port = EXCLUDED.server_listen_port,
@@ -234,6 +236,16 @@ func (r *TunnelRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (r *TunnelRepository) NextTunnelIndex(ctx context.Context) (int, error) {
+	var next int
+	err := r.db.DB.GetContext(ctx, &next,
+		`SELECT COALESCE(MAX(tunnel_index), 0) + 1 FROM reseller_tunnels`)
+	if err != nil {
+		return 0, fmt.Errorf("next tunnel index: %w", err)
+	}
+	return next, nil
+}
+
 func (r *TunnelRepository) mapToDomain(rec *tunnelRecord) *tunnel.ResellerTunnel {
 	t := &tunnel.ResellerTunnel{
 		ID:              rec.ID,
@@ -246,6 +258,9 @@ func (r *TunnelRepository) mapToDomain(rec *tunnelRecord) *tunnel.ResellerTunnel
 		Status:          tunnel.Status(rec.Status),
 		CreatedAt:       rec.CreatedAt,
 		UpdatedAt:       rec.UpdatedAt,
+	}
+	if rec.TunnelIndex.Valid {
+		t.TunnelIndex = int(rec.TunnelIndex.Int32)
 	}
 
 	if rec.ServerPublicKey.Valid {
@@ -298,6 +313,7 @@ func (r *TunnelRepository) mapToRecord(t *tunnel.ResellerTunnel) *tunnelRecord {
 		Name:            t.Name,
 		VPNType:         string(t.VPNType),
 		Namespace:       t.Namespace,
+		TunnelIndex:     toNullInt32(t.TunnelIndex),
 		RouterOSVersion: t.RouterOSVersion,
 		Status:          string(t.Status),
 		CreatedAt:       t.CreatedAt,

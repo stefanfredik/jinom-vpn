@@ -27,6 +27,7 @@ type TunnelResponse struct {
 	Name            string    `json:"name"`
 	VPNType         string    `json:"vpn_type"`
 	Namespace       string    `json:"namespace"`
+	TunnelIndex     int       `json:"tunnel_index"`
 	ServerPublicKey string    `json:"server_public_key,omitempty"`
 	ServerListenPort int      `json:"server_listen_port,omitempty"`
 	ServerIPAddress string    `json:"server_ip_address,omitempty"`
@@ -63,6 +64,7 @@ func ToTunnelResponse(t *tunnel.ResellerTunnel) TunnelResponse {
 		Name:              t.Name,
 		VPNType:           string(t.VPNType),
 		Namespace:         t.Namespace,
+		TunnelIndex:       t.TunnelIndex,
 		ServerPublicKey:   t.ServerPublicKey,
 		ServerListenPort:  t.ServerListenPort,
 		ServerIPAddress:   t.ServerIPAddress,

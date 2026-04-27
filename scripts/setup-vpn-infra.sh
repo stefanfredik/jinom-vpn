@@ -213,8 +213,8 @@ info "Configuring firewall rules..."
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
     info "UFW detected, adding rules..."
 
-    # WireGuard port range (51821-52074, based on reseller_id % 254 + 1)
-    ufw allow 51821:52074/udp comment "jinom-vpn WireGuard tunnels" 2>/dev/null || true
+    # WireGuard port range (51821-67820, support 16000 tunnels)
+    ufw allow 51821:67820/udp comment "jinom-vpn WireGuard tunnels" 2>/dev/null || true
 
     # L2TP/IPSec ports
     ufw allow 500/udp comment "jinom-vpn IKE (IPSec)" 2>/dev/null || true
@@ -226,8 +226,8 @@ else
     info "UFW not active, adding iptables rules..."
 
     # WireGuard port range
-    iptables -C INPUT -p udp --dport 51821:52074 -j ACCEPT 2>/dev/null || \
-        iptables -A INPUT -p udp --dport 51821:52074 -j ACCEPT
+    iptables -C INPUT -p udp --dport 51821:67820 -j ACCEPT 2>/dev/null || \
+        iptables -A INPUT -p udp --dport 51821:67820 -j ACCEPT
 
     # L2TP/IPSec
     iptables -C INPUT -p udp --dport 500 -j ACCEPT 2>/dev/null || \
