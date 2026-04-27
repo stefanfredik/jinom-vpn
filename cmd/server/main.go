@@ -73,7 +73,7 @@ func main() {
 		tunnelRepo, nsSvc, wgSvc, l2tpSvc, provisionerSvc, vpsPublicIP, zapLogger,
 	)
 
-	healthMonitor := service.NewHealthMonitorService(tunnelRepo, nsSvc, zapLogger)
+	healthMonitor := service.NewHealthMonitorService(tunnelRepo, nsSvc, wgSvc, l2tpSvc, vpsPublicIP, zapLogger)
 	healthMonitor.Start()
 	defer healthMonitor.Stop()
 

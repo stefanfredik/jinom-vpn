@@ -134,23 +134,36 @@ func (s *L2TPService) routeTableID(index int) string {
 func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask string, index int, clientIP string) {
 	_, _, _, subnet := indexToVethIPs(index)
 
-	// Cleanup DNAT rules for IPSec and L2TP forwarding to namespace
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
+	// List of potential internal IPs to clean up (current, old legacy, and zero-index)
+	oldIPs := []string{nsIPNoMask, "10.254.222.2", "10.254.0.2"}
+	
+	for _, ip := range oldIPs {
+		// Cleanup DNAT rules for IPSec and L2TP forwarding to namespace
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", ip+":500")
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", ip+":4500")
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", ip+":1701")
 
-	// Cleanup SNAT rules
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", nsIPNoMask, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", nsIPNoMask, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", nsIPNoMask, "-p", "udp", "--sport", "1701", "-j", "SNAT", "--to-source", s.vpsPublicIP+":1701")
+		// Cleanup legacy DNAT rules without -d filter
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", ip+":500")
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", ip+":4500")
+		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", ip+":1701")
+		
+		// Cleanup SNAT rules
+		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
+		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
+		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "1701", "-j", "SNAT", "--to-source", s.vpsPublicIP+":1701")
+		
+		// Cleanup FORWARD rules
+		s.deleteRule("-t", "filter", "-D", "FORWARD", "-d", ip, "-j", "ACCEPT")
+		s.deleteRule("-t", "filter", "-D", "FORWARD", "-s", ip, "-j", "ACCEPT")
+	}
 
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", routerIP, "-j", "MASQUERADE") // Old legacy rule
+	// Cleanup MASQUERADE and other router-specific rules
+	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", routerIP, "-j", "MASQUERADE")
 	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE")
 	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", clientIP, "-j", "MASQUERADE")
-	s.deleteRule("-t", "filter", "-D", "FORWARD", "-d", nsIPNoMask, "-j", "ACCEPT")
-	s.deleteRule("-t", "filter", "-D", "FORWARD", "-s", nsIPNoMask, "-j", "ACCEPT")
 
-	// Cleanup legacy policy routing rules from previous versions
+	// Cleanup legacy policy routing
 	tableID := s.routeTableID(index)
 	for {
 		if exec.Command("ip", "rule", "del", "from", routerIP, "lookup", tableID).Run() != nil {
@@ -159,14 +172,12 @@ func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask string, index int, cli
 	}
 	exec.Command("ip", "route", "flush", "table", tableID).Run()
 
-	// Cleanup legacy DNAT rules without -d filter
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "50", "-j", "DNAT", "--to-destination", nsIPNoMask)
-	s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
-
-	exec.Command("conntrack", "-D", "-s", routerIP).Run()
-	exec.Command("conntrack", "-D", "-d", routerIP).Run()
+	exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "500").Run()
+	exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "4500").Run()
+	exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "1701").Run()
+	exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "500").Run()
+	exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "4500").Run()
+	exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "1701").Run()
 }
 
 func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunnel.ResellerTunnel, nsIPNoMask string, index int, vethHost, vethNs string) error {
@@ -193,12 +204,12 @@ func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunn
 }
 
 func (s *L2TPService) ipsecConfDir(ns string) string {
-	return "/etc/ipsec.d"
+	return fmt.Sprintf("/etc/ipsec.d/%s", ns)
 }
 
 func (s *L2TPService) ipsecEnv(nsConfDir string) []string {
 	return append(os.Environ(),
-		"IPSEC_CONFS="+nsConfDir,
+		"IPSEC_CONFDIR="+nsConfDir,
 	)
 }
 
@@ -291,8 +302,7 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	exec.Command("ip", "link", "del", vethHost).CombinedOutput()
 
 	confDir := s.ipsecConfDir(t.Namespace)
-	_ = os.Remove(filepath.Join(confDir, "jinom-"+t.Namespace+".conf"))
-	_ = os.Remove(filepath.Join(confDir, "jinom-"+t.Namespace+".secrets"))
+	_ = os.RemoveAll(confDir)
 	_ = os.Remove(filepath.Join("/etc/xl2tpd", t.Namespace+".conf"))
 	_ = os.Remove(filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", t.Namespace)))
 
@@ -335,17 +345,17 @@ func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask stri
 	}
 
 	mainConf := fmt.Sprintf(`config setup
-    charondebug="ike 4, enc 4, knl 2, cfg 2, net 2"
-    uniqueids=no
+    charondebug="ike 2, enc 1, knl 2, cfg 2, net 2"
+    uniqueids=yes
 
-include %s/jinom-*.conf
-`, nsConfDir)
+include %s/%s.conf
+`, nsConfDir, connName)
 	mainConfPath := filepath.Join(nsConfDir, "ipsec.conf")
 	if err := os.WriteFile(mainConfPath, []byte(mainConf), 0600); err != nil {
 		return err
 	}
 
-	mainSecrets := fmt.Sprintf("include %s/jinom-*.secrets\n", nsConfDir)
+	mainSecrets := fmt.Sprintf("include %s/%s.secrets\n", nsConfDir, connName)
 	mainSecretsPath := filepath.Join(nsConfDir, "ipsec.secrets")
 	return os.WriteFile(mainSecretsPath, []byte(mainSecrets), 0600)
 }
@@ -362,10 +372,10 @@ local ip = %s
 require chap = yes
 refuse pap = yes
 require authentication = no
-name = jinom-vpn
+name = %s
 pppoptfile = /etc/ppp/options.xl2tpd
-length bit = yes
-`, stripCIDR(t.ClientIPAddress), stripCIDR(t.ServerIPAddress))
+length bit = no
+`, stripCIDR(t.ClientIPAddress), stripCIDR(t.ServerIPAddress), t.Namespace)
 
 	if err := os.MkdirAll("/etc/xl2tpd", 0755); err != nil {
 		return err

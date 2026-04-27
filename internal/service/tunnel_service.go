@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ type TunnelService struct {
 	provisioner *ProvisionerService
 	vpsPublicIP string
 	log         *zap.Logger
+	setupMu     sync.Mutex
 }
 
 func NewTunnelService(
@@ -116,6 +118,9 @@ func (s *TunnelService) Activate(ctx context.Context, id uuid.UUID) error {
 		return tunnel.ErrAlreadyActive
 	}
 
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
 	s.log.Info("Activating tunnel", zap.String("id", id.String()), zap.String("namespace", t.Namespace))
 
 	if err := s.repo.UpdateStatus(ctx, id, tunnel.StatusProvisioning, ""); err != nil {
@@ -158,6 +163,9 @@ func (s *TunnelService) Deactivate(ctx context.Context, id uuid.UUID) error {
 	if !t.CanDeactivate() {
 		return tunnel.ErrNotActive
 	}
+
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
 
 	s.log.Info("Deactivating tunnel", zap.String("id", id.String()))
 
