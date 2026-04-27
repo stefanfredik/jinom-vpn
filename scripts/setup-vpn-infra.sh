@@ -185,7 +185,7 @@ hide-password
 modem
 debug
 name jinom-vpn
-proxyarp
+noproxyarp
 lcp-echo-interval 30
 lcp-echo-failure 4
 mtu 1400

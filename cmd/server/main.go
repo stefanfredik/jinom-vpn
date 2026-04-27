@@ -57,7 +57,7 @@ func main() {
 
 	nsSvc := service.NewNamespaceService(zapLogger)
 	wgSvc := service.NewWireGuardService(nsSvc, zapLogger)
-	l2tpSvc := service.NewL2TPService(nsSvc, zapLogger)
+	l2tpSvc := service.NewL2TPService(nsSvc, cfg.VPSPublicIP, zapLogger)
 	provisionerSvc := service.NewProvisionerService(zapLogger)
 
 	vpsPublicIP := cfg.VPSPublicIP
