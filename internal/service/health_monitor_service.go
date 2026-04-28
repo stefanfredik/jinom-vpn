@@ -2,12 +2,21 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/jinom/vpn/internal/domain/tunnel"
+)
+
+var (
+	pingLossRegex    = regexp.MustCompile(`([\d.]+)% packet loss`)
+	pingLatencyRegex = regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms`)
 )
 
 type tunnelHealthState struct {
@@ -114,18 +123,67 @@ func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 }
 
 func (s *HealthMonitorService) checkTunnel(ctx context.Context, t *tunnel.ResellerTunnel) {
+	metric := &tunnel.TunnelMetric{
+		TunnelID:  t.ID,
+		Timestamp: time.Now(),
+	}
+
 	if !s.nsSvc.Exists(t.Namespace) {
 		s.handleFailure(ctx, t, "namespace does not exist")
 		return
 	}
 
 	peerIP := extractIP(t.ClientIPAddress)
-	_, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "2", "-W", "3", peerIP)
+	out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "2", "-W", "3", peerIP)
 
 	if err != nil {
+		loss := 100.0
+		metric.PacketLoss = &loss
+		s.repo.SaveMetric(ctx, metric)
 		s.handleFailure(ctx, t, "peer unreachable")
 		return
 	}
+
+	// Parse Ping
+	outStr := string(out)
+	if m := pingLossRegex.FindStringSubmatch(outStr); len(m) > 1 {
+		if loss, e := strconv.ParseFloat(m[1], 64); e == nil {
+			metric.PacketLoss = &loss
+		}
+	}
+	if m := pingLatencyRegex.FindStringSubmatch(outStr); len(m) > 1 {
+		if lat, e := strconv.ParseFloat(m[1], 64); e == nil {
+			metric.LatencyMS = &lat
+		}
+	}
+
+	// Fetch Wireguard Rx/Tx if applicable
+	if t.VPNType == tunnel.VPNTypeWireGuard {
+		ifName := fmt.Sprintf("wg-%s", t.Namespace)
+		if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "transfer"); e == nil {
+			parts := strings.Fields(string(wgOut))
+			if len(parts) >= 3 {
+				if rx, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil {
+					metric.RxBytes = &rx
+				}
+				if tx, e2 := strconv.ParseInt(parts[2], 10, 64); e2 == nil {
+					metric.TxBytes = &tx
+				}
+			}
+		}
+		if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "latest-handshakes"); e == nil {
+			parts := strings.Fields(string(wgOut))
+			if len(parts) >= 2 {
+				if ts, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil && ts > 0 {
+					ht := time.Unix(ts, 0)
+					metric.HandshakeTime = &ht
+				}
+			}
+		}
+	}
+
+	// Save Metric
+	s.repo.SaveMetric(ctx, metric)
 
 	s.handleSuccess(ctx, t)
 }
@@ -173,6 +231,11 @@ func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.Rese
 			zap.String("reason", reason),
 		)
 		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusDown, reason)
+		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
+			TunnelID: t.ID,
+			Status:   tunnel.StatusDown,
+			Reason:   reason,
+		})
 	}
 }
 
@@ -209,6 +272,11 @@ func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.Re
 			zap.Error(err),
 		)
 		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusDown, "recovery failed: "+err.Error())
+		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
+			TunnelID: t.ID,
+			Status:   tunnel.StatusDown,
+			Reason:   "recovery failed: " + err.Error(),
+		})
 		return
 	}
 
@@ -234,5 +302,10 @@ func (s *HealthMonitorService) handleSuccess(ctx context.Context, t *tunnel.Rese
 			zap.String("namespace", t.Namespace),
 		)
 		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusActive, "")
+		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
+			TunnelID: t.ID,
+			Status:   tunnel.StatusActive,
+			Reason:   "tunnel recovered",
+		})
 	}
 }

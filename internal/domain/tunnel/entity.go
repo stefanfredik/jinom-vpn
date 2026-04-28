@@ -94,3 +94,21 @@ func (t *ResellerTunnel) CanActivate() bool {
 func (t *ResellerTunnel) CanDeactivate() bool {
 	return t.Status == StatusActive || t.Status == StatusDown
 }
+
+type TunnelMetric struct {
+	TunnelID      uuid.UUID
+	Timestamp     time.Time
+	LatencyMS     *float64
+	PacketLoss    *float64
+	RxBytes       *int64
+	TxBytes       *int64
+	HandshakeTime *time.Time
+}
+
+type TunnelStatusHistory struct {
+	ID        uuid.UUID
+	TunnelID  uuid.UUID
+	Status    Status
+	Reason    string
+	CreatedAt time.Time
+}

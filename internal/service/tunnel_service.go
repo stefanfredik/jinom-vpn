@@ -276,6 +276,14 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 	return status, nil
 }
 
+func (s *TunnelService) GetMetrics(ctx context.Context, id uuid.UUID, limit int) ([]tunnel.TunnelMetric, error) {
+	return s.repo.GetMetrics(ctx, id, limit)
+}
+
+func (s *TunnelService) GetStatusHistory(ctx context.Context, id uuid.UUID, limit int) ([]tunnel.TunnelStatusHistory, error) {
+	return s.repo.GetStatusHistory(ctx, id, limit)
+}
+
 func (s *TunnelService) setError(ctx context.Context, id uuid.UUID, err error) {
 	_ = s.repo.UpdateStatus(ctx, id, tunnel.StatusError, err.Error())
 }

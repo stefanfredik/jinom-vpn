@@ -176,6 +176,42 @@ func (h *TunnelHandler) Delete(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "tunnel deleted"})
 }
 
+func (h *TunnelHandler) GetMetrics(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+	limit, _ := strconv.Atoi(c.Query("limit", "100"))
+
+	metrics, err := h.svc.GetMetrics(c.Context(), id, limit)
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    metrics,
+	})
+}
+
+func (h *TunnelHandler) GetHistory(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+	limit, _ := strconv.Atoi(c.Query("limit", "50"))
+
+	history, err := h.svc.GetStatusHistory(c.Context(), id, limit)
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    history,
+	})
+}
+
 func handleTunnelError(c *fiber.Ctx, err error) error {
 	if errors.Is(err, tunnel.ErrNotFound) {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
