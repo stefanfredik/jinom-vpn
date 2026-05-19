@@ -251,14 +251,14 @@ sudo systemctl disable strongswan-starter xl2tpd
 
 #### 8. Firewall Rules
 
-**WireGuard** — port range berdasarkan `51820 + reseller_id`:
+**WireGuard** — port range berdasarkan `51820 + tunnel index`:
 
 ```bash
 # UFW
-sudo ufw allow 51821:52074/udp comment "jinom-vpn WireGuard"
+sudo ufw allow 51821:67820/udp comment "jinom-vpn WireGuard"
 
 # atau iptables
-sudo iptables -A INPUT -p udp --dport 51821:52074 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 51821:67820 -j ACCEPT
 ```
 
 **L2TP/IPSec**:
@@ -308,7 +308,7 @@ echo "Network namespaces working!"
 | Port | Protocol | Fungsi |
 |------|----------|--------|
 | `8090` | TCP | jinom-vpn HTTP API |
-| `51821-52074` | UDP | WireGuard tunnels (per-reseller) |
+| `51821-67820` | UDP | WireGuard tunnels (per-tunnel) |
 | `500` | UDP | IKE (IPSec key exchange) |
 | `4500` | UDP | NAT-T (IPSec NAT traversal) |
 | `1701` | UDP | L2TP |
@@ -454,40 +454,199 @@ sudo kill $(pgrep jinom-vpn)
 
 ## Production Deployment
 
-### Option A: Systemd Service (Recommended)
+Bagian ini untuk setup `jinom-vpn` di server production. Rekomendasi deployment: binary Go + systemd, berjalan sebagai `root`, karena service membuat network namespace, interface WireGuard/L2TP, dan config IPSec di host.
 
-#### 1. Build binary
+### Ringkasan Flow
+
+1. Siapkan server Linux production.
+2. Pull source ke `/opt/jinom-vpn`.
+3. Build binary.
+4. Jalankan `scripts/setup-vpn-infra.sh`.
+5. Buat `.env` production.
+6. Daftarkan systemd service.
+7. Buka firewall.
+8. Update `.env` jinom-nms agar mengarah ke service ini.
+9. Verifikasi `/health` dan log systemd.
+
+### Setup Cepat Dengan Script
+
+Setelah source tersedia di server production, jalankan installer:
+
+```bash
+cd /opt/jinom-vpn
+sudo ./scripts/install-production.sh \
+  --db-host <postgres-host-production> \
+  --db-user <postgres-user> \
+  --db-password '<postgres-password>' \
+  --db-name <postgres-db-name> \
+  --vps-public-ip <public-ip-server-vpn>
+```
+
+Script ini akan:
+
+- Build binary `bin/jinom-vpn`.
+- Jalankan `scripts/setup-vpn-infra.sh`.
+- Buat/update `/opt/jinom-vpn/.env`.
+- Generate `MASTER_KEY` dan `API_KEY` jika belum ada.
+- Buat/update systemd unit `jinom-vpn.service`.
+- Restart service dan cek `/health`.
+
+Untuk melihat tanpa mengubah file/service:
+
+```bash
+./scripts/install-production.sh \
+  --db-host <postgres-host-production> \
+  --db-user <postgres-user> \
+  --db-password '<postgres-password>' \
+  --db-name <postgres-db-name> \
+  --vps-public-ip <public-ip-server-vpn> \
+  --dry-run
+```
+
+Integrasikan `jinom-nms` ke service VPN:
+
+```bash
+cd /opt/jinom-vpn
+./scripts/integrate-jinom-nms.sh \
+  --nms-dir /opt/jinom-nms \
+  --vpn-url http://<vpn-server-private-or-public-ip>:8090/api/v1 \
+  --from-vpn-env /opt/jinom-vpn/.env \
+  --patch-compose \
+  --restart
+```
+
+`--patch-compose` diperlukan jika production `jinom-nms` berjalan dengan Docker Compose dan file compose belum meneruskan `VPN_SERVICE_URL` / `VPN_SERVICE_API_KEY` ke container `server` dan `worker`.
+
+Jika ingin review dulu:
+
+```bash
+./scripts/integrate-jinom-nms.sh \
+  --nms-dir /opt/jinom-nms \
+  --vpn-url http://<vpn-server-private-or-public-ip>:8090/api/v1 \
+  --from-vpn-env /opt/jinom-vpn/.env \
+  --patch-compose \
+  --dry-run
+```
+
+### 1. Server Requirements
+
+Gunakan Ubuntu 22.04/24.04 LTS atau Debian compatible. Pastikan server punya:
+
+- Public IP statis untuk endpoint VPN.
+- Akses `root` atau user dengan `sudo`.
+- Koneksi ke PostgreSQL production yang dipakai jinom-nms.
+- Port masuk dari internet untuk WireGuard/L2TP.
+- Port `8090/tcp` hanya dibuka dari server jinom-nms.
+
+### 2. Clone Source
+
+```bash
+sudo mkdir -p /opt/jinom-vpn
+sudo chown -R "$USER":"$USER" /opt/jinom-vpn
+
+git clone <repo-url-jinom-vpn> /opt/jinom-vpn
+cd /opt/jinom-vpn
+```
+
+Jika source sudah ada:
+
+```bash
+cd /opt/jinom-vpn
+git pull
+```
+
+### 3. Install Go dan Build Binary
+
+Install Go 1.24+ jika belum ada:
+
+```bash
+go version
+```
+
+Build binary:
 
 ```bash
 cd /opt/jinom-vpn
 make build
 ```
 
-#### 2. Buat `.env` production
+Hasil build berada di:
+
+```text
+/opt/jinom-vpn/bin/jinom-vpn
+```
+
+### 4. Setup Infrastruktur VPN Host
+
+Jalankan script infra sekali di server production:
+
+```bash
+cd /opt/jinom-vpn
+sudo ./scripts/setup-vpn-infra.sh
+```
+
+Script ini install package VPN, enable IP forwarding, setup StrongSwan/xl2tpd base config, setup PPP options, disable global StrongSwan/xl2tpd service, dan tambah firewall rule dasar.
+
+Verifikasi cepat:
+
+```bash
+wg --version
+ipsec --version
+xl2tpd --version
+cat /proc/sys/net/ipv4/ip_forward
+sudo ip netns add __test__ && sudo ip netns del __test__
+```
+
+Nilai `cat /proc/sys/net/ipv4/ip_forward` harus `1`.
+
+### 5. Buat `.env` Production
+
+Generate secret:
+
+```bash
+openssl rand -base64 32
+openssl rand -hex 32
+```
+
+Buat `/opt/jinom-vpn/.env`:
 
 ```env
 APP_ENV=production
 LISTEN_ADDR=:8090
 
-DB_HOST=your-db-host
+DB_HOST=<postgres-host-production>
 DB_PORT=5432
-DB_USER=nms_user
-DB_PASSWORD=<strong-password>
-DB_NAME=nms_db
+DB_USER=<postgres-user>
+DB_PASSWORD=<postgres-password>
+DB_NAME=<postgres-db-name>
 DB_SSL_MODE=require
 
-MASTER_KEY=<openssl rand -base64 32>
-API_KEY=<openssl rand -hex 32>
-VPS_PUBLIC_IP=<public-ip-vps-ini>
+MASTER_KEY=<output-openssl-rand-base64-32>
+API_KEY=<output-openssl-rand-hex-32>
+VPS_PUBLIC_IP=<public-ip-server-vpn>
 ```
 
-#### 3. Buat systemd unit file
+Catatan:
+
+- `MASTER_KEY` wajib stabil. Jangan diganti setelah data terenkripsi tersimpan, kecuali ada proses migrasi key.
+- `API_KEY` harus sama dengan `VPN_SERVICE_API_KEY` di jinom-nms.
+- `VPS_PUBLIC_IP` harus IP publik yang bisa dijangkau router MikroTik customer.
+- Pakai `DB_SSL_MODE=disable` hanya kalau PostgreSQL berada di private network yang dipercaya dan memang tidak memakai SSL.
+
+Kunci permission file env:
+
+```bash
+sudo chown root:root /opt/jinom-vpn/.env
+sudo chmod 600 /opt/jinom-vpn/.env
+```
+
+### 6. Buat Systemd Service
 
 ```bash
 sudo tee /etc/systemd/system/jinom-vpn.service << 'EOF'
 [Unit]
 Description=Jinom VPN Tunnel Manager
-After=network-online.target postgresql.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -501,32 +660,115 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
 
-# Hardening (tetap izinkan network namespace operations)
-ProtectSystem=strict
-ReadWritePaths=/etc/wireguard /etc/ipsec.d /etc/xl2tpd /run
-ProtectHome=true
-NoNewPrivileges=false
-
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
 
-#### 4. Enable & start
+Start service:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable jinom-vpn
-sudo systemctl start jinom-vpn
+sudo systemctl restart jinom-vpn
+```
 
-# Cek status
+Cek status dan log:
+
+```bash
 sudo systemctl status jinom-vpn
-
-# Cek logs
 sudo journalctl -u jinom-vpn -f
 ```
 
-### Option B: Docker
+### 7. Firewall Production
+
+Batasi HTTP API hanya dari server jinom-nms:
+
+```bash
+sudo ufw allow from <nms-server-ip> to any port 8090 proto tcp comment "jinom-vpn API from jinom-nms"
+```
+
+Buka port tunnel:
+
+```bash
+sudo ufw allow 51821:67820/udp comment "jinom-vpn WireGuard"
+sudo ufw allow 500/udp comment "jinom-vpn IPSec IKE"
+sudo ufw allow 4500/udp comment "jinom-vpn IPSec NAT-T"
+sudo ufw allow 1701/udp comment "jinom-vpn L2TP"
+```
+
+Jika memakai iptables langsung:
+
+```bash
+sudo iptables -A INPUT -p tcp -s <nms-server-ip> --dport 8090 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 51821:67820 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 500 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 4500 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 1701 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+### 8. Integrasi Dengan Project Production `jinom-nms`
+
+Di `.env` production jinom-nms, set:
+
+```env
+VPN_SERVICE_URL=http://<vpn-server-private-or-public-ip>:8090/api/v1
+VPN_SERVICE_API_KEY=<API_KEY-yang-sama-dengan-jinom-vpn>
+```
+
+Gunakan private IP/VPC IP jika jinom-nms dan jinom-vpn berada di jaringan private yang sama. Gunakan public IP hanya jika perlu, dan pastikan firewall `8090/tcp` hanya menerima traffic dari IP server jinom-nms.
+
+Restart service jinom-nms setelah env berubah.
+
+### 9. Verifikasi Production
+
+Dari server jinom-vpn:
+
+```bash
+curl http://127.0.0.1:8090/health
+```
+
+Dari server jinom-nms:
+
+```bash
+curl http://<vpn-server-ip>:8090/health
+curl -H "X-API-Key: <API_KEY>" http://<vpn-server-ip>:8090/api/v1/tunnels
+```
+
+Response `/health` harus:
+
+```json
+{
+  "status": "healthy",
+  "service": "jinom-vpn",
+  "database": "connected"
+}
+```
+
+### 10. Update Deployment
+
+Saat ada update source:
+
+```bash
+cd /opt/jinom-vpn
+git pull
+make build
+sudo systemctl restart jinom-vpn
+sudo journalctl -u jinom-vpn -n 100 --no-pager
+```
+
+### 11. Backup Yang Perlu Dijaga
+
+Simpan aman file dan nilai berikut:
+
+- `/opt/jinom-vpn/.env`
+- Nilai `MASTER_KEY`
+- Nilai `API_KEY`
+- Backup database jinom-nms/jinom-vpn
+- Config host di `/etc/ipsec.d`, `/etc/xl2tpd`, dan `/etc/wireguard` jika tunnel sudah pernah dibuat
+
+### Docker Deployment
 
 > **Catatan:** Karena jinom-vpn memanipulasi host networking (network namespaces, WireGuard interfaces, sysctl), Docker container harus berjalan dengan `privileged` dan `host network`. Ini praktis menghilangkan isolasi container — gunakan hanya jika membutuhkan konsistensi deployment.
 
@@ -569,8 +811,8 @@ Flags yang diperlukan:
 # Izinkan API access (batasi ke jinom-nms saja di production)
 sudo ufw allow from <nms-server-ip> to any port 8090
 
-# Izinkan WireGuard tunnel ports (range 51821-52074)
-sudo ufw allow 51821:52074/udp
+# Izinkan WireGuard tunnel ports (range 51821-67820)
+sudo ufw allow 51821:67820/udp
 
 # Izinkan L2TP/IPSec
 sudo ufw allow 500/udp    # IKE
