@@ -4,9 +4,17 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	routeros "github.com/go-routeros/routeros/v3"
 )
+
+// defaultDialTimeout adalah batas waktu konek TCP+login ke RouterOS API.
+// Linux TCP default (~2 menit) tidak bisa diterima untuk operasi cleanup yang
+// dipanggil sinkron oleh DELETE handler — operator menunggu HTTP respons.
+// Pilihan 10s: cukup untuk router lambat di tautan internet tipis, tidak
+// terlalu agresif untuk koneksi pertama yang butuh handshake TLS/IPsec.
+const defaultDialTimeout = 10 * time.Second
 
 // resolveAPIAddress accepts a router address that may or may not carry an
 // explicit API port and returns a valid "host:port" string for routeros.Dial.
@@ -46,8 +54,15 @@ type Client struct {
 }
 
 func NewClient(address, username, password string, isV7 bool) (*Client, error) {
+	return NewClientWithTimeout(address, username, password, isV7, defaultDialTimeout)
+}
+
+// NewClientWithTimeout sama dengan NewClient tetapi caller menentukan timeout
+// dial+login secara eksplisit. Dipakai oleh test dan oleh path khusus yang
+// punya konteks deadline berbeda (cleanup synchronous vs. provisioning).
+func NewClientWithTimeout(address, username, password string, isV7 bool, timeout time.Duration) (*Client, error) {
 	addr := resolveAPIAddress(address, 8728)
-	conn, err := routeros.Dial(addr, username, password)
+	conn, err := routeros.DialTimeout(addr, username, password, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial routeros %s: %w", addr, err)
 	}

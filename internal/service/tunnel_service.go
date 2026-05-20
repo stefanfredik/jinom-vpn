@@ -24,6 +24,18 @@ type TunnelService struct {
 	vpsPublicIP string
 	log         *zap.Logger
 	setupMu     sync.Mutex
+	// onDelete dipanggil oleh Delete() setelah row DB sukses dihapus. Dipakai
+	// untuk membersihkan state in-memory pihak ketiga (HealthMonitor map).
+	// Optional — boleh nil. Decoupling ini menghindari import cycle antara
+	// TunnelService dan HealthMonitorService.
+	onDelete func(id string)
+}
+
+// SetOnDeleteHook mendaftarkan hook yang dipanggil sekali setelah delete
+// berhasil persisten ke DB. Idempotent: hanya satu hook didukung; pemanggilan
+// kedua menggantikan yang pertama.
+func (s *TunnelService) SetOnDeleteHook(fn func(id string)) {
+	s.onDelete = fn
 }
 
 func NewTunnelService(
@@ -244,19 +256,98 @@ func (s *TunnelService) Provision(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// Delete melepaskan tunnel sepenuhnya: artefak di MikroTik (interface, peer,
+// IP, route), state di VPS (namespace, veth, iptables, config files), lalu
+// row DB. Bersifat best-effort untuk setiap layer:
+//
+//   - Kalau Deprovision ke router gagal (router unreachable, password salah,
+//     dll), kami log warn lalu LANJUT — operator bisa cleanup manual lewat
+//     log message yang menyebut router_ip & tunnel_id eksplisit.
+//   - Kalau Teardown VPS gagal sebagian, log warn dan tetap lanjut hapus row.
+//   - Row DB selalu dihapus terakhir; semua orphan rows anak (metrics,
+//     status_history) dihapus oleh ON DELETE CASCADE di migration.
+//
+// Penting: cleanup VPS dilakukan TANPA syarat IsActive(). Tunnel dengan
+// status pending / provisioning / error masih bisa meninggalkan namespace,
+// veth, iptables, dan config files; tanpa cleanup unconditional, sisa-sisa
+// ini menumpuk seumur hidup VPS.
 func (s *TunnelService) Delete(ctx context.Context, id uuid.UUID) error {
 	t, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	if t.IsActive() {
-		if err := s.Deactivate(ctx, id); err != nil {
-			s.log.Warn("Failed to deactivate before delete", zap.Error(err))
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	s.log.Info("Deleting tunnel",
+		zap.String("id", id.String()),
+		zap.String("namespace", t.Namespace),
+		zap.String("router_ip", t.RouterIP),
+		zap.String("vpn_type", string(t.VPNType)),
+		zap.String("status_at_delete", string(t.Status)),
+	)
+
+	s.cleanupRouterBestEffort(t)
+	s.cleanupVPSBestEffort(t)
+
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete tunnel row: %w", err)
+	}
+
+	if s.onDelete != nil {
+		s.onDelete(id.String())
+	}
+
+	s.log.Info("Tunnel deleted", zap.String("id", id.String()))
+	return nil
+}
+
+// cleanupRouterBestEffort memanggil Deprovisioner ke MikroTik. Kegagalan
+// hanya menghasilkan log warn supaya operator bisa membersihkan manual —
+// tidak menghalangi penghapusan DB.
+func (s *TunnelService) cleanupRouterBestEffort(t *tunnel.ResellerTunnel) {
+	if t.RouterIP == "" {
+		s.log.Warn("Skip router cleanup: empty router_ip",
+			zap.String("tunnel_id", t.ID.String()))
+		return
+	}
+	if err := s.provisioner.Deprovision(t); err != nil {
+		s.log.Warn("Router cleanup failed — manual cleanup may be required",
+			zap.String("tunnel_id", t.ID.String()),
+			zap.String("router_ip", t.RouterIP),
+			zap.String("namespace", t.Namespace),
+			zap.Error(err),
+		)
+	}
+}
+
+// cleanupVPSBestEffort menjalankan teardown VPN (per type) + namespace delete.
+// Teardown semua idempotent, jadi memanggilnya saat artefak tidak ada hanya
+// menghasilkan warning di dalam, bukan error fatal.
+func (s *TunnelService) cleanupVPSBestEffort(t *tunnel.ResellerTunnel) {
+	switch t.VPNType {
+	case tunnel.VPNTypeWireGuard:
+		if err := s.wgSvc.Teardown(t); err != nil {
+			s.log.Warn("WireGuard teardown returned error",
+				zap.String("tunnel_id", t.ID.String()), zap.Error(err))
+		}
+	case tunnel.VPNTypeL2TP:
+		if err := s.l2tpSvc.Teardown(t); err != nil {
+			s.log.Warn("L2TP teardown returned error",
+				zap.String("tunnel_id", t.ID.String()), zap.Error(err))
 		}
 	}
 
-	return s.repo.Delete(ctx, id)
+	if s.nsSvc.Exists(t.Namespace) {
+		if err := s.nsSvc.Delete(t.Namespace); err != nil {
+			s.log.Warn("Namespace delete failed — manual cleanup may be required",
+				zap.String("tunnel_id", t.ID.String()),
+				zap.String("namespace", t.Namespace),
+				zap.Error(err),
+			)
+		}
+	}
 }
 
 func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelStatus, error) {

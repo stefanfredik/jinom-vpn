@@ -111,6 +111,15 @@ func (s *HealthMonitorService) getState(id string) *tunnelHealthState {
 	return st
 }
 
+// Forget melepas state map entry untuk tunnel id. Dipanggil oleh
+// TunnelService.Delete supaya struct in-memory `states` tidak terus tumbuh
+// setelah banyak tunnel dihapus. Aman dipanggil dengan ID tidak dikenal.
+func (s *HealthMonitorService) Forget(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.states, id)
+}
+
 func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 	tunnels, err := s.repo.FindActive(ctx)
 	if err != nil {
@@ -121,6 +130,28 @@ func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 	for i := range tunnels {
 		t := &tunnels[i]
 		s.checkTunnel(ctx, t)
+	}
+
+	// Lazy purge: pasangan-pengaman untuk Forget() — kalau ada path delete
+	// yang lupa memanggil Forget, ID yang sudah tidak muncul di FindActive
+	// tetap dibersihkan satu siklus kemudian.
+	s.purgeStale(tunnels)
+}
+
+// purgeStale menghapus entri map states yang tidak lagi merupakan tunnel
+// aktif. Bukan pengganti Forget(): Forget() langsung saat delete, purgeStale
+// hanya jaring pengaman.
+func (s *HealthMonitorService) purgeStale(active []tunnel.ResellerTunnel) {
+	live := make(map[string]struct{}, len(active))
+	for i := range active {
+		live[active[i].ID.String()] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.states {
+		if _, ok := live[id]; !ok {
+			delete(s.states, id)
+		}
 	}
 }
 

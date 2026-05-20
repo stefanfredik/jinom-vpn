@@ -77,6 +77,10 @@ func main() {
 	tunnelSvc.Reconcile(context.Background())
 
 	healthMonitor := service.NewHealthMonitorService(tunnelRepo, nsSvc, wgSvc, l2tpSvc, vpsPublicIP, zapLogger)
+	// Hook agar Delete tunnel sekaligus melepaskan entry map in-memory di
+	// monitor — jaga supaya `states` tidak tumbuh tak terbatas saat banyak
+	// tunnel dibuat & dihapus.
+	tunnelSvc.SetOnDeleteHook(healthMonitor.Forget)
 	healthMonitor.Start()
 	defer healthMonitor.Stop()
 
