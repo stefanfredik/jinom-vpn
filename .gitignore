@@ -1,0 +1,18 @@
+# Environment
+.env
+.env.bak*
+
+# Binaries
+bin/
+*.exe
+server
+
+# Logs
+*.log
+
+# Workspace
+.vscode/
+jinom-project.code-workspace
+
+# OS
+.DS_Store
