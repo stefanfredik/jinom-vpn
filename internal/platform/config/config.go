@@ -2,6 +2,7 @@ package config
 
 import (
 	"github.com/spf13/viper"
+	"github.com/subosito/gotenv"
 )
 
 type Config struct {
@@ -29,18 +30,20 @@ type SecurityConfig struct {
 
 func LoadConfig(path string) *Config {
 	if path != "" {
-		viper.SetConfigFile(path)
+		_ = gotenv.Load(path)
+	} else {
+		_ = gotenv.Load()
 	}
-	viper.AutomaticEnv()
 
+	viper.AutomaticEnv()
 	viper.SetDefault("APP_ENV", "development")
 	viper.SetDefault("LISTEN_ADDR", ":8090")
 	viper.SetDefault("VPS_PUBLIC_IP", "")
 	viper.SetDefault("DB_HOST", "localhost")
 	viper.SetDefault("DB_PORT", 5432)
-	viper.SetDefault("DB_USER", "jinom")
-	viper.SetDefault("DB_PASSWORD", "jinom")
-	viper.SetDefault("DB_NAME", "jinom_nms")
+	viper.SetDefault("DB_USER", "nms_user")
+	viper.SetDefault("DB_PASSWORD", "nms_pass")
+	viper.SetDefault("DB_NAME", "nms_db")
 	viper.SetDefault("DB_SSL_MODE", "disable")
 	viper.SetDefault("MASTER_KEY", "")
 	viper.SetDefault("API_KEY", "")
@@ -56,8 +59,6 @@ func LoadConfig(path string) *Config {
 	_ = viper.BindEnv("DB_SSL_MODE")
 	_ = viper.BindEnv("MASTER_KEY")
 	_ = viper.BindEnv("API_KEY")
-
-	_ = viper.ReadInConfig()
 
 	var cfg Config
 	_ = viper.Unmarshal(&cfg)
