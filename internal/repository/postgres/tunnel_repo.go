@@ -206,8 +206,11 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 			router_password_enc = EXCLUDED.router_password_enc,
 			routeros_version = EXCLUDED.routeros_version,
 			monitoring_subnets = EXCLUDED.monitoring_subnets,
-			status = EXCLUDED.status,
-			last_error = EXCLUDED.last_error,
+			-- Intentionally do NOT update status / last_error on upsert.
+			-- The in-memory struct passed to Save() carries whatever status was
+			-- in DB when we loaded it; writing it back would silently revert
+			-- any concurrent UpdateStatus that happened in between. Status
+			-- transitions go exclusively through UpdateStatus().
 			updated_at = EXCLUDED.updated_at`
 
 	_, err := r.db.DB.NamedExecContext(ctx, query, rec)

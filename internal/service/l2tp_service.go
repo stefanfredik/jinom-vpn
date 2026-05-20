@@ -26,6 +26,32 @@ func stripCIDR(addr string) string {
 	return ip.String()
 }
 
+// stripPort returns just the host portion of an address that may be in
+// "host:port" form. RouterIP is sometimes stored as "10.0.0.1:9291" because
+// MikroTik's API port is configurable; iptables -s and the strongswan/xl2tpd
+// configs expect a bare IP or CIDR, so any port suffix breaks them silently.
+//
+// Inputs accepted: "10.0.0.1", "10.0.0.1:9291", "10.0.0.1/24", "[::1]:500".
+// Anything net.SplitHostPort can't parse is returned unchanged.
+func stripPort(addr string) string {
+	if addr == "" {
+		return addr
+	}
+	// Already a CIDR (no port suffix possible) — leave it.
+	if _, _, err := net.ParseCIDR(addr); err == nil {
+		return addr
+	}
+	// Bare IP — fast path.
+	if net.ParseIP(addr) != nil {
+		return addr
+	}
+	// Try host:port. SplitHostPort handles [v6]:port and host:port.
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
 type L2TPService struct {
 	nsSvc       *NamespaceService
 	log         *zap.Logger
@@ -115,7 +141,7 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 		return fmt.Errorf("failed to add default route in namespace: %w", err)
 	}
 
-	s.cleanupRouting(t.RouterIP, nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
+	s.cleanupRouting(stripPort(t.RouterIP), nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
 	if err := s.setupRouting(runCmd, t, nsIPNoMask, t.TunnelIndex, vethHost, vethNs); err != nil {
 		return fmt.Errorf("setup routing: %w", err)
 	}
@@ -214,14 +240,19 @@ func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask string, index int, cli
 func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunnel.ResellerTunnel, nsIPNoMask string, index int, vethHost, vethNs string) error {
 	_, _, _, subnet := indexToVethIPs(index)
 
+	// RouterIP may carry a port suffix ("1.2.3.4:9291" — MikroTik's API port is
+	// configurable and is stored alongside the host). iptables -s and -d only
+	// accept host or CIDR, so always strip the port before passing through.
+	routerHost := stripPort(t.RouterIP)
+
 	// s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", s.vpsPublicIP+"/32", "dev", vethNs)
 
 	// Use DNAT to redirect IPSec/L2TP traffic from router to namespace.
 	// Policy routing cannot work because the host's local table (priority 0)
 	// intercepts packets destined for vpsPublicIP before custom rules are checked.
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", t.RouterIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
+	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
+	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
+	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
 
 	runCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", nsIPNoMask, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
 	runCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "2", "-s", nsIPNoMask, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
@@ -329,7 +360,7 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
 
-	s.cleanupRouting(t.RouterIP, nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
+	s.cleanupRouting(stripPort(t.RouterIP), nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
 	exec.Command("ip", "link", "del", vethHost).CombinedOutput()
 
 	confDir := s.ipsecConfDir(t.Namespace)
@@ -350,6 +381,7 @@ func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask stri
 		return err
 	}
 
+	routerHost := stripPort(t.RouterIP)
 	connConf := fmt.Sprintf(`conn %s
     authby=secret
     auto=add
@@ -363,7 +395,7 @@ func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask stri
     lifetime=3600s
     ike=aes128-sha1-modp1024,aes128-md5-modp1024,3des-sha1-modp1024!
     esp=aes256-sha1-modp1024,aes192-sha1-modp1024,aes128-sha1-modp1024!
-`, connName, nsIPNoMask, s.vpsPublicIP, t.RouterIP)
+`, connName, nsIPNoMask, s.vpsPublicIP, routerHost)
 
 	connPath := filepath.Join(nsConfDir, connName+".conf")
 	if err := os.WriteFile(connPath, []byte(connConf), 0600); err != nil {
@@ -371,7 +403,7 @@ func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask stri
 	}
 
 	secrets := fmt.Sprintf(`%s %s : PSK "%s"
-`, s.vpsPublicIP, t.RouterIP, t.PSK)
+`, s.vpsPublicIP, routerHost, t.PSK)
 	secretsPath := filepath.Join(nsConfDir, connName+".secrets")
 	if err := os.WriteFile(secretsPath, []byte(secrets), 0600); err != nil {
 		return err

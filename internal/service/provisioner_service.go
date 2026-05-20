@@ -218,7 +218,7 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 			s.log.Error("Failed to create L2TP interface",
 				zap.String("path", cmd.Path),
 				zap.Error(err),
-				zap.Any("params", cmd.Params),
+				zap.Any("params", redactParams(cmd.Params)),
 			)
 			return fmt.Errorf("provision l2tp cmd %s: %w", cmd.Path, err)
 		}
@@ -238,7 +238,7 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 	}
 
 	s.log.Info("L2TP interface created successfully",
-		zap.Any("interface_status", verifyRes[0]),
+		zap.Any("interface_status", redactRouterReply(verifyRes[0])),
 	)
 
 	// Add route to tunnel
@@ -258,4 +258,37 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 	}
 
 	return nil
+}
+
+// sensitiveParamKeys lists MikroTik command parameter names whose values must
+// be masked when logged. The set covers L2TP/IPSec PSK & passwords plus any
+// WireGuard key material that might appear in command params.
+var sensitiveParamKeys = map[string]struct{}{
+	"password":      {},
+	"ipsec-secret":  {},
+	"psk":           {},
+	"private-key":   {},
+	"preshared-key": {},
+	"secret":        {},
+	"user":          {}, // usernames are also identifying, redact to be safe
+}
+
+// redactParams returns a copy of params with sensitive values replaced by "***".
+// Use this before any zap log that includes raw RouterOS command parameters.
+func redactParams(params map[string]string) map[string]string {
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		if _, sensitive := sensitiveParamKeys[k]; sensitive && v != "" {
+			out[k] = "***"
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// redactRouterReply masks sensitive fields in a RouterOS reply row map
+// (e.g. `/interface/wireguard/print` returns private-key in cleartext).
+func redactRouterReply(row map[string]string) map[string]string {
+	return redactParams(row)
 }

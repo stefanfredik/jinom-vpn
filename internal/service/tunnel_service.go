@@ -202,6 +202,16 @@ func (s *TunnelService) Provision(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 
+	// Provision can run concurrently with Activate/Deactivate/Reconcile, all of
+	// which mutate the same MikroTik interface and the same host-side
+	// namespace/iptables state. Without the same mutex they hold we hit races
+	// where (e.g.) an Activate tears down a half-finished provision or two
+	// concurrent Provisions both try to remove and re-add wg-jinom on the
+	// router. Hold setupMu for the full duration including the post-provision
+	// AttachPeer call below.
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
 	if err := s.provisioner.Provision(t, s.vpsPublicIP); err != nil {
 		s.setError(ctx, id, err)
 		return fmt.Errorf("provision mikrotik: %w", err)
