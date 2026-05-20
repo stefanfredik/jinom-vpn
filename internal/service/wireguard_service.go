@@ -81,7 +81,7 @@ func (s *WireGuardService) Setup(t *tunnel.ResellerTunnel) error {
 		return fmt.Errorf("bring up wg: %w", err)
 	}
 
-	for _, subnet := range t.MonitoringSubnets {
+	for _, subnet := range effectiveSubnets(t.MonitoringSubnets) {
 		if _, err := s.nsSvc.ExecInNS(ns, "ip", "route", "add", subnet, "dev", ifName); err != nil {
 			s.log.Warn("Failed to add route for subnet", zap.String("subnet", subnet), zap.Error(err))
 		}
@@ -110,10 +110,7 @@ func (s *WireGuardService) Teardown(t *tunnel.ResellerTunnel) error {
 }
 
 func (s *WireGuardService) generateConfig(t *tunnel.ResellerTunnel) string {
-	allowedIPs := "0.0.0.0/0"
-	if len(t.MonitoringSubnets) > 0 {
-		allowedIPs = strings.Join(t.MonitoringSubnets, ", ")
-	}
+	allowedIPs := strings.Join(effectiveSubnets(t.MonitoringSubnets), ", ")
 
 	return fmt.Sprintf(`[Interface]
 ListenPort = %d

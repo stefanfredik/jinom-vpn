@@ -33,7 +33,27 @@ type L2TPService struct {
 }
 
 func NewL2TPService(nsSvc *NamespaceService, vpsPublicIP string, log *zap.Logger) *L2TPService {
-	return &L2TPService{nsSvc: nsSvc, vpsPublicIP: vpsPublicIP, log: log}
+	svc := &L2TPService{nsSvc: nsSvc, vpsPublicIP: vpsPublicIP, log: log}
+	svc.installIPUpScript()
+	return svc
+}
+
+func (s *L2TPService) installIPUpScript() {
+	scriptPath := "/etc/ppp/ip-up.d/99-jinom-routes"
+	scriptContent := `#!/bin/sh
+# $1: IFNAME (e.g. ppp0)
+# $6: IPPARAM (e.g. ns-res-11)
+
+if [ -n "$6" ] && [ -f "/etc/ppp/routes.$6" ]; then
+    while read subnet; do
+        if [ -n "$subnet" ]; then
+            ip route add "$subnet" dev "$1" || true
+        fi
+    done < "/etc/ppp/routes.$6"
+fi
+`
+	_ = os.MkdirAll("/etc/ppp/ip-up.d", 0755)
+	_ = os.WriteFile(scriptPath, []byte(scriptContent), 0755)
 }
 
 func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
@@ -305,6 +325,8 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	_ = os.RemoveAll(confDir)
 	_ = os.Remove(filepath.Join("/etc/xl2tpd", t.Namespace+".conf"))
 	_ = os.Remove(filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", t.Namespace)))
+	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("options.%s", t.Namespace)))
+	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace)))
 
 	return nil
 }
@@ -361,6 +383,37 @@ include %s/%s.conf
 }
 
 func (s *L2TPService) writeXL2TPDConfig(t *tunnel.ResellerTunnel) error {
+	optsPath := filepath.Join("/etc/ppp", fmt.Sprintf("options.%s", t.Namespace))
+	routesPath := filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace))
+
+	opts := fmt.Sprintf(`ipcp-accept-local
+ipcp-accept-remote
+require-mschap-v2
+ms-dns 8.8.8.8
+ms-dns 8.8.4.4
+asyncmap 0
+crtscts
+lock
+hide-password
+modem
+debug
+name jinom-vpn
+proxyarp
+lcp-echo-interval 60
+lcp-echo-failure 10
+mtu 1100
+mru 1100
+ipparam %s
+`, t.Namespace)
+	if err := os.WriteFile(optsPath, []byte(opts), 0600); err != nil {
+		return err
+	}
+
+	routesData := strings.Join(effectiveSubnets(t.MonitoringSubnets), "\n") + "\n"
+	if err := os.WriteFile(routesPath, []byte(routesData), 0600); err != nil {
+		return err
+	}
+
 	conf := fmt.Sprintf(`[global]
 port = 1701
 access control = no
@@ -373,9 +426,9 @@ require chap = yes
 refuse pap = yes
 require authentication = no
 name = %s
-pppoptfile = /etc/ppp/options.xl2tpd
+pppoptfile = %s
 length bit = no
-`, stripCIDR(t.ClientIPAddress), stripCIDR(t.ServerIPAddress), t.Namespace)
+`, stripCIDR(t.ClientIPAddress), stripCIDR(t.ServerIPAddress), t.Namespace, optsPath)
 
 	if err := os.MkdirAll("/etc/xl2tpd", 0755); err != nil {
 		return err
