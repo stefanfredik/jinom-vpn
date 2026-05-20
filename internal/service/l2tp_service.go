@@ -56,12 +56,23 @@ fi
 	_ = os.WriteFile(scriptPath, []byte(scriptContent), 0755)
 }
 
-func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
+func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 	s.log.Info("Setting up L2TP/IPSec tunnel",
 		zap.String("namespace", t.Namespace),
 		zap.String("tunnel", t.Name),
 		zap.Int("tunnel_index", t.TunnelIndex),
 	)
+
+	// Any failure beyond this point may leave veth, iptables rules, daemons,
+	// or config files behind. Teardown is idempotent — running it on a
+	// partial setup is safe and the cheapest way to keep state consistent.
+	defer func() {
+		if err != nil {
+			s.log.Warn("L2TP setup failed, rolling back",
+				zap.String("namespace", t.Namespace), zap.Error(err))
+			_ = s.Teardown(t)
+		}
+	}()
 
 	hostIP, nsIP, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)

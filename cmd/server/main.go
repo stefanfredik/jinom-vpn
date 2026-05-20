@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -72,6 +73,8 @@ func main() {
 	tunnelSvc := service.NewTunnelService(
 		tunnelRepo, nsSvc, wgSvc, l2tpSvc, provisionerSvc, vpsPublicIP, zapLogger,
 	)
+
+	tunnelSvc.Reconcile(context.Background())
 
 	healthMonitor := service.NewHealthMonitorService(tunnelRepo, nsSvc, wgSvc, l2tpSvc, vpsPublicIP, zapLogger)
 	healthMonitor.Start()

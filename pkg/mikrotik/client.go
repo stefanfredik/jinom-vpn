@@ -3,7 +3,7 @@ package mikrotik
 import (
 	"fmt"
 
-	"gopkg.in/routeros.v2"
+	routeros "github.com/go-routeros/routeros/v3"
 )
 
 type Command struct {

@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -131,6 +133,23 @@ func (s *HealthMonitorService) checkTunnel(ctx context.Context, t *tunnel.Resell
 	if !s.nsSvc.Exists(t.Namespace) {
 		s.handleFailure(ctx, t, "namespace does not exist")
 		return
+	}
+
+	// WireGuard tunnels are evaluated by handshake freshness rather than ICMP:
+	// a MikroTik with firewall may silently drop pings while the tunnel itself
+	// is healthy, and conversely a peer can be ICMP-reachable for a few seconds
+	// after its WireGuard session has actually expired.
+	if t.VPNType == tunnel.VPNTypeWireGuard {
+		s.checkWireGuard(ctx, t, metric)
+		return
+	}
+
+	// L2TP: prefer the IPSec SA state. Falls back to ICMP only if statusall
+	// can't be read at all (binary missing, namespace gone, etc.).
+	if t.VPNType == tunnel.VPNTypeL2TP {
+		if handled := s.checkL2TPViaIPSec(ctx, t, metric); handled {
+			return
+		}
 	}
 
 	peerIP := extractIP(t.ClientIPAddress)
@@ -283,6 +302,108 @@ func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.Re
 	s.log.Info("Tunnel recovery initiated",
 		zap.String("tunnel_id", t.ID.String()),
 	)
+}
+
+// wgHandshakeStaleAfter is how long we tolerate a peer being silent before
+// declaring it down. WireGuard's own session lifetime is ~3 min; anything
+// older than that is almost certainly a real outage.
+const wgHandshakeStaleAfter = 3 * time.Minute
+
+var ipsecSAUpRegex = regexp.MustCompile(`Security Associations \((\d+) up,`)
+
+// checkL2TPViaIPSec evaluates an L2TP tunnel by inspecting its IPSec SA state
+// inside the namespace. Returns true if the verdict was decided here (so the
+// caller skips the ICMP fallback). When strongSwan output can't be parsed at
+// all we return false and let ping take over.
+func (s *HealthMonitorService) checkL2TPViaIPSec(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) bool {
+	confDir := fmt.Sprintf("/etc/ipsec.d/%s", t.Namespace)
+	cmd := exec.Command("ip", "netns", "exec", t.Namespace, "ipsec", "statusall")
+	cmd.Env = append(os.Environ(), "IPSEC_CONFDIR="+confDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		s.log.Debug("ipsec statusall failed, falling back to ping",
+			zap.String("namespace", t.Namespace), zap.Error(err))
+		return false
+	}
+
+	m := ipsecSAUpRegex.FindStringSubmatch(string(out))
+	if len(m) < 2 {
+		return false
+	}
+	up, perr := strconv.Atoi(m[1])
+	if perr != nil {
+		return false
+	}
+
+	s.repo.SaveMetric(ctx, metric)
+	if up > 0 {
+		s.handleSuccess(ctx, t)
+	} else {
+		s.handleFailure(ctx, t, "no ipsec SA established")
+	}
+	return true
+}
+
+func (s *HealthMonitorService) checkWireGuard(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) {
+	ifName := fmt.Sprintf("wg-%s", t.Namespace)
+
+	// Peer not yet provisioned — interface is up and waiting. Treat as
+	// healthy-pending so it doesn't churn through recovery attempts.
+	if t.ClientPublicKey == "" {
+		s.repo.SaveMetric(ctx, metric)
+		s.handleSuccess(ctx, t)
+		return
+	}
+
+	if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "transfer"); e == nil {
+		parts := strings.Fields(string(wgOut))
+		if len(parts) >= 3 {
+			if rx, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil {
+				metric.RxBytes = &rx
+			}
+			if tx, e2 := strconv.ParseInt(parts[2], 10, 64); e2 == nil {
+				metric.TxBytes = &tx
+			}
+		}
+	}
+
+	hsOut, err := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "latest-handshakes")
+	if err != nil {
+		s.repo.SaveMetric(ctx, metric)
+		s.handleFailure(ctx, t, "wg show failed: "+err.Error())
+		return
+	}
+
+	parts := strings.Fields(string(hsOut))
+	if len(parts) < 2 {
+		s.repo.SaveMetric(ctx, metric)
+		s.handleFailure(ctx, t, "no peer configured on wg interface")
+		return
+	}
+	ts, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		s.repo.SaveMetric(ctx, metric)
+		s.handleFailure(ctx, t, "unparseable handshake timestamp")
+		return
+	}
+
+	if ts == 0 {
+		// Peer was just attached and has not handshaked yet. Don't fail; the
+		// next tick will re-check after MikroTik sends its first keepalive.
+		s.repo.SaveMetric(ctx, metric)
+		s.handleSuccess(ctx, t)
+		return
+	}
+
+	last := time.Unix(ts, 0)
+	metric.HandshakeTime = &last
+	s.repo.SaveMetric(ctx, metric)
+
+	if age := time.Since(last); age > wgHandshakeStaleAfter {
+		s.handleFailure(ctx, t, fmt.Sprintf("last handshake %s ago", age.Truncate(time.Second)))
+		return
+	}
+	s.handleSuccess(ctx, t)
 }
 
 func (s *HealthMonitorService) handleSuccess(ctx context.Context, t *tunnel.ResellerTunnel) {

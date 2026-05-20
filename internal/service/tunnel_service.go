@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,6 +144,18 @@ func (s *TunnelService) Activate(ctx context.Context, id uuid.UUID) error {
 	}
 
 	if setupErr != nil {
+		// Roll back so a partial setup doesn't leave the namespace or
+		// interface behind. WireGuardService.Setup already cleans its own
+		// interface, but we still own the namespace we created above.
+		switch t.VPNType {
+		case tunnel.VPNTypeWireGuard:
+			_ = s.wgSvc.Teardown(t)
+		case tunnel.VPNTypeL2TP:
+			_ = s.l2tpSvc.Teardown(t)
+		}
+		if s.nsSvc.Exists(t.Namespace) {
+			_ = s.nsSvc.Delete(t.Namespace)
+		}
 		s.setError(ctx, id, setupErr)
 		return fmt.Errorf("setup vpn: %w", setupErr)
 	}
@@ -192,6 +205,29 @@ func (s *TunnelService) Provision(ctx context.Context, id uuid.UUID) error {
 	if err := s.provisioner.Provision(t, s.vpsPublicIP); err != nil {
 		s.setError(ctx, id, err)
 		return fmt.Errorf("provision mikrotik: %w", err)
+	}
+
+	if t.VPNType == tunnel.VPNTypeWireGuard && t.ClientPublicKey != "" {
+		if err := s.repo.Save(ctx, t); err != nil {
+			return fmt.Errorf("persist client public key: %w", err)
+		}
+		if t.IsActive() && s.nsSvc.Exists(t.Namespace) {
+			if err := s.wgSvc.AttachPeer(t); err != nil {
+				s.log.Warn("Failed to attach wg peer live", zap.Error(err))
+			}
+		}
+	}
+
+	// Provision pushed config to the MikroTik (client-side) successfully.
+	// Clear any stale last_error and move out of terminal-failure states so
+	// the tunnel is ready for Activate. Preserve StatusActive when re-provisioning
+	// a running tunnel — Save() above does not touch Status/LastError.
+	newStatus := tunnel.StatusPending
+	if t.Status == tunnel.StatusActive {
+		newStatus = tunnel.StatusActive
+	}
+	if err := s.repo.UpdateStatus(ctx, id, newStatus, ""); err != nil {
+		return fmt.Errorf("update status after provision: %w", err)
 	}
 
 	s.log.Info("Tunnel provisioned to MikroTik", zap.String("id", id.String()))
@@ -274,6 +310,78 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 	}
 
 	return status, nil
+}
+
+// Reconcile re-creates the namespace and VPN interface for every tunnel that
+// the database believes is active but whose runtime state has been wiped
+// (e.g. after the host rebooted). Tunnels whose setup fails are flagged as
+// error so an operator can investigate; we never silently downgrade them to
+// pending because the MikroTik side may still have a working configuration.
+func (s *TunnelService) Reconcile(ctx context.Context) {
+	tunnels, err := s.repo.FindActive(ctx)
+	if err != nil {
+		s.log.Error("Reconcile: failed to list active tunnels", zap.Error(err))
+		return
+	}
+	if len(tunnels) == 0 {
+		s.log.Info("Reconcile: no active tunnels to restore")
+		return
+	}
+	s.log.Info("Reconcile: restoring active tunnels", zap.Int("count", len(tunnels)))
+
+	for i := range tunnels {
+		t := &tunnels[i]
+		ifName := fmt.Sprintf("wg-%s", t.Namespace)
+		if t.VPNType == tunnel.VPNTypeL2TP {
+			ifName = fmt.Sprintf("l2tp-%s", t.Namespace)
+		}
+
+		if s.interfaceUpInNS(t.Namespace, ifName) {
+			s.log.Debug("Reconcile: tunnel already healthy", zap.String("id", t.ID.String()))
+			continue
+		}
+
+		s.log.Info("Reconcile: re-setting up tunnel",
+			zap.String("id", t.ID.String()),
+			zap.String("namespace", t.Namespace),
+			zap.String("vpn_type", string(t.VPNType)),
+		)
+
+		if !s.nsSvc.Exists(t.Namespace) {
+			if err := s.nsSvc.Create(t.Namespace); err != nil {
+				s.log.Error("Reconcile: create namespace failed",
+					zap.String("id", t.ID.String()), zap.Error(err))
+				s.setError(ctx, t.ID, err)
+				continue
+			}
+		}
+
+		var setupErr error
+		switch t.VPNType {
+		case tunnel.VPNTypeWireGuard:
+			setupErr = s.wgSvc.Setup(t)
+		case tunnel.VPNTypeL2TP:
+			setupErr = s.l2tpSvc.Setup(t)
+		}
+		if setupErr != nil {
+			s.log.Error("Reconcile: setup failed",
+				zap.String("id", t.ID.String()), zap.Error(setupErr))
+			s.setError(ctx, t.ID, setupErr)
+			continue
+		}
+		s.log.Info("Reconcile: tunnel restored", zap.String("id", t.ID.String()))
+	}
+}
+
+func (s *TunnelService) interfaceUpInNS(ns, ifName string) bool {
+	if !s.nsSvc.Exists(ns) {
+		return false
+	}
+	out, err := s.nsSvc.ExecInNS(ns, "ip", "-br", "link", "show", ifName)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "UP") || strings.Contains(string(out), "UNKNOWN")
 }
 
 func (s *TunnelService) GetMetrics(ctx context.Context, id uuid.UUID, limit int) ([]tunnel.TunnelMetric, error) {

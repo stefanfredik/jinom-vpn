@@ -31,6 +31,7 @@ type TunnelResponse struct {
 	ServerPublicKey string    `json:"server_public_key,omitempty"`
 	ServerListenPort int      `json:"server_listen_port,omitempty"`
 	ServerIPAddress string    `json:"server_ip_address,omitempty"`
+	ClientPublicKey string    `json:"client_public_key,omitempty"`
 	ClientIPAddress string    `json:"client_ip_address,omitempty"`
 	RouterIP        string    `json:"router_ip,omitempty"`
 	RouterOSVersion int       `json:"routeros_version"`
@@ -68,6 +69,7 @@ func ToTunnelResponse(t *tunnel.ResellerTunnel) TunnelResponse {
 		ServerPublicKey:   t.ServerPublicKey,
 		ServerListenPort:  t.ServerListenPort,
 		ServerIPAddress:   t.ServerIPAddress,
+		ClientPublicKey:   t.ClientPublicKey,
 		ClientIPAddress:   t.ClientIPAddress,
 		RouterIP:          t.RouterIP,
 		RouterOSVersion:   t.RouterOSVersion,

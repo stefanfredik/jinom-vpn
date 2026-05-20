@@ -3,14 +3,15 @@ module github.com/jinom/vpn
 go 1.24.0
 
 require (
+	github.com/go-routeros/routeros/v3 v3.0.1
 	github.com/gofiber/fiber/v2 v2.52.6
 	github.com/google/uuid v1.6.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.10.9
 	github.com/spf13/viper v1.21.0
+	github.com/subosito/gotenv v1.6.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.47.0
-	gopkg.in/routeros.v2 v2.0.0-20190905230420-1bbf141cdd91
 )
 
 require (
@@ -28,7 +29,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.51.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect

@@ -24,8 +24,7 @@ func (s *ProvisionerService) Provision(t *tunnel.ResellerTunnel, vpsPublicIP str
 		return fmt.Errorf("invalid VPS public IP: %q - must set VPS_PUBLIC_IP environment variable to a valid public IP address", vpsPublicIP)
 	}
 
-	// Validate tunnel has credentials before provisioning
-	if t.PSK == "" {
+	if t.VPNType == tunnel.VPNTypeL2TP && t.PSK == "" {
 		return fmt.Errorf("tunnel PSK not set - cannot provision without IPSec pre-shared key")
 	}
 
@@ -34,7 +33,6 @@ func (s *ProvisionerService) Provision(t *tunnel.ResellerTunnel, vpsPublicIP str
 		zap.Int("ros_version", t.RouterOSVersion),
 		zap.String("vpn_type", string(t.VPNType)),
 		zap.String("vps_public_ip", vpsPublicIP),
-		zap.String("psk_configured", "yes"),
 	)
 
 	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
@@ -68,24 +66,41 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 		c.Run("/ip/address/remove", map[string]string{".id": resIp[0][".id"]})
 	}
 
-	commands := []mikrotik.Command{
-		{
-			Path: "/interface/wireguard/add",
-			Params: map[string]string{
-				"name":        "wg-jinom",
-				"listen-port": "13231",
-				"disabled":    "no",
-			},
+	if err := c.RunCommand(mikrotik.Command{
+		Path: "/interface/wireguard/add",
+		Params: map[string]string{
+			"name":        "wg-jinom",
+			"listen-port": "13231",
+			"disabled":    "no",
 		},
+	}); err != nil {
+		return fmt.Errorf("provision wireguard cmd /interface/wireguard/add: %w", err)
+	}
+
+	wgRes, err := c.Run("/interface/wireguard/print", map[string]string{"?name": "wg-jinom"})
+	if err != nil || len(wgRes) == 0 {
+		return fmt.Errorf("read wg-jinom public-key from mikrotik: %w", err)
+	}
+	clientPubKey := wgRes[0]["public-key"]
+	if clientPubKey == "" {
+		return fmt.Errorf("mikrotik returned empty public-key for wg-jinom (router fields: %v)", wgRes[0])
+	}
+	t.ClientPublicKey = clientPubKey
+	s.log.Info("Captured WireGuard client public key from MikroTik",
+		zap.String("client_public_key", clientPubKey),
+	)
+
+	commands := []mikrotik.Command{
 		{
 			Path: "/interface/wireguard/peers/add",
 			Params: map[string]string{
-				"interface":        "wg-jinom",
-				"public-key":       t.ServerPublicKey,
-				"endpoint-address": vpsIP,
-				"endpoint-port":    fmt.Sprintf("%d", t.ServerListenPort),
-				"allowed-address":  "0.0.0.0/0",
-				"disabled":         "no",
+				"interface":           "wg-jinom",
+				"public-key":          t.ServerPublicKey,
+				"endpoint-address":    vpsIP,
+				"endpoint-port":       fmt.Sprintf("%d", t.ServerListenPort),
+				"allowed-address":     "0.0.0.0/0",
+				"persistent-keepalive": "25s",
+				"disabled":            "no",
 			},
 		},
 		{
