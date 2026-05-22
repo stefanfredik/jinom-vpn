@@ -53,15 +53,22 @@ type Client struct {
 	isV7 bool
 }
 
-func NewClient(address, username, password string, isV7 bool) (*Client, error) {
-	return NewClientWithTimeout(address, username, password, isV7, defaultDialTimeout)
+// NewClient dials a RouterOS API. apiPort is the default port used when the
+// address does not already carry a "host:port" suffix; an explicit port in the
+// address (e.g. "1.2.3.4:9291") always wins to preserve the legacy override.
+// Pass 0 to fall back to the RouterOS plaintext default (8728).
+func NewClient(address string, apiPort int, username, password string, isV7 bool) (*Client, error) {
+	return NewClientWithTimeout(address, apiPort, username, password, isV7, defaultDialTimeout)
 }
 
 // NewClientWithTimeout sama dengan NewClient tetapi caller menentukan timeout
 // dial+login secara eksplisit. Dipakai oleh test dan oleh path khusus yang
 // punya konteks deadline berbeda (cleanup synchronous vs. provisioning).
-func NewClientWithTimeout(address, username, password string, isV7 bool, timeout time.Duration) (*Client, error) {
-	addr := resolveAPIAddress(address, 8728)
+func NewClientWithTimeout(address string, apiPort int, username, password string, isV7 bool, timeout time.Duration) (*Client, error) {
+	if apiPort <= 0 || apiPort > 65535 {
+		apiPort = 8728
+	}
+	addr := resolveAPIAddress(address, apiPort)
 	conn, err := routeros.DialTimeout(addr, username, password, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial routeros %s: %w", addr, err)

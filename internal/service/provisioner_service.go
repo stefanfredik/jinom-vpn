@@ -30,12 +30,13 @@ func (s *ProvisionerService) Provision(t *tunnel.ResellerTunnel, vpsPublicIP str
 
 	s.log.Info("Provisioning MikroTik router",
 		zap.String("router_ip", t.RouterIP),
+		zap.Int("api_port", t.EffectiveAPIPort()),
 		zap.Int("ros_version", t.RouterOSVersion),
 		zap.String("vpn_type", string(t.VPNType)),
 		zap.String("vps_public_ip", vpsPublicIP),
 	)
 
-	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
+	client, err := mikrotik.NewClient(t.RouterIP, t.EffectiveAPIPort(), t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
 	if err != nil {
 		return fmt.Errorf("connect to mikrotik: %w", err)
 	}
@@ -71,6 +72,7 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 		Params: map[string]string{
 			"name":        "wg-jinom",
 			"listen-port": "13231",
+			"comment":     "JINOM VPN",
 			"disabled":    "no",
 		},
 	}); err != nil {
@@ -208,6 +210,7 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 				"password":     t.L2TPPassword,
 				"use-ipsec":    "yes",
 				"ipsec-secret": t.PSK,
+				"comment":      "JINOM VPN",
 				"disabled":     "no",
 			},
 		},
@@ -278,10 +281,11 @@ func (s *ProvisionerService) Deprovision(t *tunnel.ResellerTunnel) error {
 
 	s.log.Info("Deprovisioning MikroTik router",
 		zap.String("router_ip", t.RouterIP),
+		zap.Int("api_port", t.EffectiveAPIPort()),
 		zap.String("vpn_type", string(t.VPNType)),
 	)
 
-	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
+	client, err := mikrotik.NewClient(t.RouterIP, t.EffectiveAPIPort(), t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
 	if err != nil {
 		return fmt.Errorf("connect to mikrotik: %w", err)
 	}

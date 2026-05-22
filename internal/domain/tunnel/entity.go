@@ -56,10 +56,11 @@ type ResellerTunnel struct {
 	L2TPPassword string
 	PSK          string
 
-	RouterIP       string
-	RouterUsername string
-	RouterPassword string
+	RouterIP        string
+	RouterUsername  string
+	RouterPassword  string
 	RouterOSVersion int
+	RouterAPIPort   int // 0 = use default 8728
 
 	MonitoringSubnets []string
 
@@ -93,6 +94,13 @@ func (t *ResellerTunnel) CanActivate() bool {
 
 func (t *ResellerTunnel) CanDeactivate() bool {
 	return t.Status == StatusActive || t.Status == StatusDown
+}
+
+func (t *ResellerTunnel) EffectiveAPIPort() int {
+	if t.RouterAPIPort > 0 && t.RouterAPIPort <= 65535 {
+		return t.RouterAPIPort
+	}
+	return 8728
 }
 
 type TunnelMetric struct {

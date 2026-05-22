@@ -17,6 +17,7 @@ type CreateTunnelRequest struct {
 	RouterUsername    string   `json:"router_username" validate:"required"`
 	RouterPassword    string   `json:"router_password" validate:"required"`
 	RouterOSVersion   int      `json:"routeros_version"`
+	RouterAPIPort     *int     `json:"router_api_port,omitempty" validate:"omitempty,min=1,max=65535"`
 	MonitoringSubnets []string `json:"monitoring_subnets"`
 }
 
@@ -35,6 +36,7 @@ type TunnelResponse struct {
 	ClientIPAddress string    `json:"client_ip_address,omitempty"`
 	RouterIP        string    `json:"router_ip,omitempty"`
 	RouterOSVersion int       `json:"routeros_version"`
+	RouterAPIPort   int       `json:"router_api_port"`
 	MonitoringSubnets []string `json:"monitoring_subnets"`
 	Status          string    `json:"status"`
 	LastError       string    `json:"last_error,omitempty"`
@@ -73,6 +75,7 @@ func ToTunnelResponse(t *tunnel.ResellerTunnel) TunnelResponse {
 		ClientIPAddress:   t.ClientIPAddress,
 		RouterIP:          t.RouterIP,
 		RouterOSVersion:   t.RouterOSVersion,
+		RouterAPIPort:     t.EffectiveAPIPort(),
 		MonitoringSubnets: t.MonitoringSubnets,
 		Status:            string(t.Status),
 		LastError:         t.LastError,

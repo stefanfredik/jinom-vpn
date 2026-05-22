@@ -41,6 +41,7 @@ type tunnelRecord struct {
 	RouterUsername    sql.NullString `db:"router_username"`
 	RouterPasswordEnc []byte        `db:"router_password_enc"`
 	RouterOSVersion   int           `db:"routeros_version"`
+	RouterAPIPort     int           `db:"router_api_port"`
 
 	MonitoringSubnets pq.StringArray `db:"monitoring_subnets"`
 
@@ -178,14 +179,14 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 			server_public_key, server_private_key_enc, server_listen_port, server_ip_address,
 			client_public_key, client_ip_address, client_endpoint,
 			l2tp_username, l2tp_password_enc, psk_enc,
-			router_ip, router_username, router_password_enc, routeros_version,
+			router_ip, router_username, router_password_enc, routeros_version, router_api_port,
 			monitoring_subnets, status, last_error, created_at, updated_at
 		) VALUES (
 			:id, :reseller_id, :company_id, :name, :vpn_type, :namespace, :tunnel_index,
 			:server_public_key, :server_private_key_enc, :server_listen_port, :server_ip_address,
 			:client_public_key, :client_ip_address, :client_endpoint,
 			:l2tp_username, :l2tp_password_enc, :psk_enc,
-			:router_ip, :router_username, :router_password_enc, :routeros_version,
+			:router_ip, :router_username, :router_password_enc, :routeros_version, :router_api_port,
 			:monitoring_subnets, :status, :last_error, :created_at, :updated_at
 		)
 		ON CONFLICT (id) DO UPDATE SET
@@ -205,6 +206,7 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 			router_username = EXCLUDED.router_username,
 			router_password_enc = EXCLUDED.router_password_enc,
 			routeros_version = EXCLUDED.routeros_version,
+			router_api_port = EXCLUDED.router_api_port,
 			monitoring_subnets = EXCLUDED.monitoring_subnets,
 			-- Intentionally do NOT update status / last_error on upsert.
 			-- The in-memory struct passed to Save() carries whatever status was
@@ -391,6 +393,7 @@ func (r *TunnelRepository) mapToDomain(rec *tunnelRecord) *tunnel.ResellerTunnel
 		VPNType:         tunnel.VPNType(rec.VPNType),
 		Namespace:       rec.Namespace,
 		RouterOSVersion: rec.RouterOSVersion,
+		RouterAPIPort:   rec.RouterAPIPort,
 		Status:          tunnel.Status(rec.Status),
 		CreatedAt:       rec.CreatedAt,
 		UpdatedAt:       rec.UpdatedAt,
@@ -451,6 +454,7 @@ func (r *TunnelRepository) mapToRecord(t *tunnel.ResellerTunnel) *tunnelRecord {
 		Namespace:       t.Namespace,
 		TunnelIndex:     toNullInt32(t.TunnelIndex),
 		RouterOSVersion: t.RouterOSVersion,
+		RouterAPIPort:   t.RouterAPIPort,
 		Status:          string(t.Status),
 		CreatedAt:       t.CreatedAt,
 		UpdatedAt:       t.UpdatedAt,

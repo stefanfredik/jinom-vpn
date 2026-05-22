@@ -74,6 +74,10 @@ func (s *TunnelService) Create(ctx context.Context, req CreateTunnelRequest) (*t
 		UpdatedAt:         time.Now(),
 	}
 
+	if req.RouterAPIPort != nil {
+		t.RouterAPIPort = *req.RouterAPIPort
+	}
+
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
@@ -373,7 +377,7 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 	}
 
 	// Try to fetch Mikrotik status
-	client, err := mikrotik.NewClient(t.RouterIP, t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
+	client, err := mikrotik.NewClient(t.RouterIP, t.EffectiveAPIPort(), t.RouterUsername, t.RouterPassword, t.RouterOSVersion >= 7)
 	if err == nil {
 		defer client.Close()
 		var path string
@@ -514,6 +518,7 @@ type CreateTunnelRequest struct {
 	RouterUsername    string   `json:"router_username" validate:"required"`
 	RouterPassword    string   `json:"router_password" validate:"required"`
 	RouterOSVersion   int      `json:"routeros_version"`
+	RouterAPIPort     *int     `json:"router_api_port,omitempty" validate:"omitempty,min=1,max=65535"`
 	MonitoringSubnets []string `json:"monitoring_subnets"`
 }
 

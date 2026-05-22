@@ -17,6 +17,11 @@ func TestResolveAPIAddress(t *testing.T) {
 		{"bracketed ipv6 with port", "[::1]:9291", 8728, "[::1]:9291"},
 		{"bare ipv6 gets bracketed", "::1", 8728, "[::1]:8728"},
 		{"empty defaults to host-less port", "", 8728, ":8728"},
+		// Custom defaultPort from RouterAPIPort column — bare address gets the
+		// caller-supplied port, while an embedded port in the address still wins.
+		{"bare ipv4 custom default port", "1.2.3.4", 9291, "1.2.3.4:9291"},
+		{"ipv4 embedded port overrides custom default", "1.2.3.4:8729", 9291, "1.2.3.4:8729"},
+		{"hostname custom default port", "rtr.local", 8729, "rtr.local:8729"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
