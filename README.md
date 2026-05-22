@@ -370,7 +370,7 @@ openssl rand -base64 32
 jinom-vpn menggunakan database yang sama dengan jinom-nms. Jika jinom-nms stack sudah running:
 
 ```bash
-# Database sudah tersedia via jinom-nms docker compose
+# Database sudah tersedia via jinom-nms
 # Host: localhost, Port: 15432, User: nms_user, Password: nms_pass, DB: nms_db
 ```
 
@@ -417,25 +417,14 @@ curl http://localhost:8090/health
 
 ### 4. Integrasi dengan jinom-nms
 
-jinom-nms mengakses jinom-vpn via `VPN_SERVICE_URL`. Karena jinom-nms berjalan di Docker sedangkan jinom-vpn berjalan di host:
-
-**jinom-nms `.env`:**
+jinom-nms mengakses jinom-vpn via `VPN_SERVICE_URL`. Set di `.env` jinom-nms:
 
 ```env
-VPN_SERVICE_URL=http://host.docker.internal:8090/api/v1
+VPN_SERVICE_URL=http://<vpn-host-ip>:8090/api/v1
 VPN_SERVICE_API_KEY=jinom-vpn-api-key-secret
 ```
 
-**jinom-nms `docker-compose.dev.yml`** — tambahkan `extra_hosts` pada service `server`:
-
-```yaml
-services:
-  server:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
-
-Ini memungkinkan container jinom-nms menjangkau jinom-vpn yang berjalan di host machine.
+Gunakan IP yang menjangkau host tempat jinom-vpn berjalan (loopback bila satu host, IP private/public bila lintas host).
 
 ### 5. Menjalankan di Background
 
@@ -511,11 +500,8 @@ cd /opt/jinom-vpn
   --nms-dir /opt/jinom-nms \
   --vpn-url http://<vpn-server-private-or-public-ip>:8090/api/v1 \
   --from-vpn-env /opt/jinom-vpn/.env \
-  --patch-compose \
   --restart
 ```
-
-`--patch-compose` diperlukan jika production `jinom-nms` berjalan dengan Docker Compose dan file compose belum meneruskan `VPN_SERVICE_URL` / `VPN_SERVICE_API_KEY` ke container `server` dan `worker`.
 
 Jika ingin review dulu:
 
@@ -524,7 +510,6 @@ Jika ingin review dulu:
   --nms-dir /opt/jinom-nms \
   --vpn-url http://<vpn-server-private-or-public-ip>:8090/api/v1 \
   --from-vpn-env /opt/jinom-vpn/.env \
-  --patch-compose \
   --dry-run
 ```
 
@@ -767,43 +752,6 @@ Simpan aman file dan nilai berikut:
 - Nilai `API_KEY`
 - Backup database jinom-nms/jinom-vpn
 - Config host di `/etc/ipsec.d`, `/etc/xl2tpd`, dan `/etc/wireguard` jika tunnel sudah pernah dibuat
-
-### Docker Deployment
-
-> **Catatan:** Karena jinom-vpn memanipulasi host networking (network namespaces, WireGuard interfaces, sysctl), Docker container harus berjalan dengan `privileged` dan `host network`. Ini praktis menghilangkan isolasi container — gunakan hanya jika membutuhkan konsistensi deployment.
-
-#### 1. Build image
-
-```bash
-make docker-build
-# atau
-docker build -t jinom-vpn .
-```
-
-#### 2. Run container
-
-```bash
-docker run -d \
-  --name jinom-vpn \
-  --privileged \
-  --network host \
-  --env-file .env \
-  -v /etc/wireguard:/etc/wireguard \
-  -v /etc/ipsec.d:/etc/ipsec.d \
-  -v /etc/xl2tpd:/etc/xl2tpd \
-  --restart unless-stopped \
-  jinom-vpn
-```
-
-Flags yang diperlukan:
-
-| Flag | Alasan |
-|------|--------|
-| `--privileged` | `ip netns`, sysctl, WireGuard interface creation |
-| `--network host` | Namespace dan tunnel harus beroperasi di host network stack |
-| `-v /etc/wireguard` | Config WireGuard harus persisten di host |
-| `-v /etc/ipsec.d` | Config IPSec harus persisten di host |
-| `-v /etc/xl2tpd` | Config L2TP harus persisten di host |
 
 ### Firewall Rules
 
@@ -1193,9 +1141,7 @@ psql -h localhost -p 15432 -U nms_user -d nms_db -c "SELECT 1"
 
 ### Health check dari jinom-nms gagal (`connection refused`)
 
-jinom-nms berjalan di Docker, jinom-vpn di host. `localhost` dari dalam container = container itu sendiri.
-
-**Solusi:** Gunakan `host.docker.internal` — lihat [Integrasi dengan jinom-nms](#4-integrasi-dengan-jinom-nms).
+Pastikan `VPN_SERVICE_URL` di `.env` jinom-nms menunjuk ke IP yang menjangkau host jinom-vpn (bukan `localhost` jika jinom-nms berada di host/jaringan berbeda), port `8090/tcp` terbuka dari sisi jinom-nms, dan `API_KEY` di kedua sisi identik. Lihat [Integrasi dengan jinom-nms](#4-integrasi-dengan-jinom-nms).
 
 ### Tunnel activate gagal
 
@@ -1250,9 +1196,6 @@ sudo journalctl -u jinom-vpn -f
 
 # Binary langsung
 tail -f server.log
-
-# Docker
-docker logs -f jinom-vpn
 ```
 
 ---
@@ -1289,7 +1232,6 @@ jinom-vpn/
 │       └── logger/logger.go        # Zap logger
 ├── pkg/mikrotik/client.go          # MikroTik RouterOS API client
 ├── Makefile
-├── Dockerfile
 ├── .env
 └── go.mod
 ```
