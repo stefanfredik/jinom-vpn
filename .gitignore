@@ -5,7 +5,8 @@
 # Binaries
 bin/
 *.exe
-server
+/server
+/jinom-vpn
 
 # Logs
 *.log
