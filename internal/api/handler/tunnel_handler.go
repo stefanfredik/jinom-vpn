@@ -109,11 +109,15 @@ func (h *TunnelHandler) GetStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": dto.TunnelStatusResponse{
-			ID:            status.ID,
-			Status:        string(status.Status),
-			Namespace:     status.Namespace,
-			LastError:     status.LastError,
-			PeerReachable: status.PeerReachable,
+			ID:             status.ID,
+			Status:         string(status.Status),
+			Namespace:      status.Namespace,
+			LastError:      status.LastError,
+			PeerReachable:  status.PeerReachable,
+			MikrotikStatus: status.MikrotikStatus,
+			MikrotikIP:     status.MikrotikIP,
+			MikrotikUptime: status.MikrotikUptime,
+			Uptime:         status.Uptime,
 		},
 	})
 }

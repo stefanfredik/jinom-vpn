@@ -389,18 +389,20 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 			path = "/interface/l2tp-client/print"
 			name = "l2tp-jinom"
 		}
-		
+
 		res, err := client.Run(path, map[string]string{"?name": name})
 		if err == nil && len(res) > 0 {
-			if res[0]["disabled"] == "true" {
+			row := res[0]
+			if row["disabled"] == "true" {
 				status.MikrotikStatus = "disabled"
 			} else {
-				if res[0]["running"] == "true" {
+				if row["running"] == "true" {
 					status.MikrotikStatus = "running"
 				} else {
 					status.MikrotikStatus = "enabled"
 				}
 			}
+			status.MikrotikUptime = firstNonEmpty(row["uptime"], row["last-link-up-time"])
 		} else {
 			status.MikrotikStatus = "not found"
 		}
@@ -412,6 +414,11 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 		}
 	} else {
 		status.MikrotikStatus = "unreachable"
+	}
+
+	status.Uptime = status.MikrotikUptime
+	if status.Uptime == "" && t.IsActive() {
+		status.Uptime = formatTunnelUptime(time.Since(s.activeSince(ctx, t)))
 	}
 
 	return status, nil
@@ -530,6 +537,8 @@ type TunnelStatus struct {
 	PeerReachable  bool          `json:"peer_reachable"`
 	MikrotikStatus string        `json:"mikrotik_status,omitempty"`
 	MikrotikIP     string        `json:"mikrotik_ip,omitempty"`
+	MikrotikUptime string        `json:"mikrotik_uptime,omitempty"`
+	Uptime         string        `json:"uptime,omitempty"`
 }
 
 func extractIP(cidr string) string {
@@ -539,6 +548,48 @@ func extractIP(cidr string) string {
 		}
 	}
 	return cidr
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (s *TunnelService) activeSince(ctx context.Context, t *tunnel.ResellerTunnel) time.Time {
+	history, err := s.repo.GetStatusHistory(ctx, t.ID, 20)
+	if err != nil {
+		return t.UpdatedAt
+	}
+	for _, item := range history {
+		if item.Status == tunnel.StatusActive {
+			return item.CreatedAt
+		}
+	}
+	return t.UpdatedAt
+}
+
+func formatTunnelUptime(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+	seconds := int(d.Seconds()) % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd%dh%dm", days, hours, minutes)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh%dm%ds", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm%ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func generatePassword(length int) string {

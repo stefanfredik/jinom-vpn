@@ -22,34 +22,38 @@ type CreateTunnelRequest struct {
 }
 
 type TunnelResponse struct {
-	ID              uuid.UUID `json:"id"`
-	ResellerID      int64     `json:"reseller_id"`
-	CompanyID       int64     `json:"company_id"`
-	Name            string    `json:"name"`
-	VPNType         string    `json:"vpn_type"`
-	Namespace       string    `json:"namespace"`
-	TunnelIndex     int       `json:"tunnel_index"`
-	ServerPublicKey string    `json:"server_public_key,omitempty"`
-	ServerListenPort int      `json:"server_listen_port,omitempty"`
-	ServerIPAddress string    `json:"server_ip_address,omitempty"`
-	ClientPublicKey string    `json:"client_public_key,omitempty"`
-	ClientIPAddress string    `json:"client_ip_address,omitempty"`
-	RouterIP        string    `json:"router_ip,omitempty"`
-	RouterOSVersion int       `json:"routeros_version"`
-	RouterAPIPort   int       `json:"router_api_port"`
-	MonitoringSubnets []string `json:"monitoring_subnets"`
-	Status          string    `json:"status"`
-	LastError       string    `json:"last_error,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                uuid.UUID `json:"id"`
+	ResellerID        int64     `json:"reseller_id"`
+	CompanyID         int64     `json:"company_id"`
+	Name              string    `json:"name"`
+	VPNType           string    `json:"vpn_type"`
+	Namespace         string    `json:"namespace"`
+	TunnelIndex       int       `json:"tunnel_index"`
+	ServerPublicKey   string    `json:"server_public_key,omitempty"`
+	ServerListenPort  int       `json:"server_listen_port,omitempty"`
+	ServerIPAddress   string    `json:"server_ip_address,omitempty"`
+	ClientPublicKey   string    `json:"client_public_key,omitempty"`
+	ClientIPAddress   string    `json:"client_ip_address,omitempty"`
+	RouterIP          string    `json:"router_ip,omitempty"`
+	RouterOSVersion   int       `json:"routeros_version"`
+	RouterAPIPort     int       `json:"router_api_port"`
+	MonitoringSubnets []string  `json:"monitoring_subnets"`
+	Status            string    `json:"status"`
+	LastError         string    `json:"last_error,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type TunnelStatusResponse struct {
-	ID            uuid.UUID `json:"id"`
-	Status        string    `json:"status"`
-	Namespace     string    `json:"namespace"`
-	LastError     string    `json:"last_error,omitempty"`
-	PeerReachable bool      `json:"peer_reachable"`
+	ID             uuid.UUID `json:"id"`
+	Status         string    `json:"status"`
+	Namespace      string    `json:"namespace"`
+	LastError      string    `json:"last_error,omitempty"`
+	PeerReachable  bool      `json:"peer_reachable"`
+	MikrotikStatus string    `json:"mikrotik_status,omitempty"`
+	MikrotikIP     string    `json:"mikrotik_ip,omitempty"`
+	MikrotikUptime string    `json:"mikrotik_uptime,omitempty"`
+	Uptime         string    `json:"uptime,omitempty"`
 }
 
 type ListResponse struct {
