@@ -129,24 +129,25 @@ ok "Directories created"
 # ── 5. Configure StrongSwan (IPSec) ──────────────────────────────────────────
 info "Configuring StrongSwan..."
 
-# Main ipsec.conf — include per-tunnel configs from /etc/ipsec.d/
-cat > /etc/ipsec.conf << 'EOF'
-# /etc/ipsec.conf — StrongSwan base config for jinom-vpn
+# Base /etc/ipsec.conf and /etc/ipsec.secrets.
 #
-# Per-tunnel configs are dynamically written to /etc/ipsec.d/*.conf
-# by jinom-vpn service.
-
+# IMPORTANT: jinom-vpn runs a SEPARATE, fully isolated charon per tunnel inside
+# a private mount namespace. For each tunnel it bind-mounts that tunnel's
+# /etc/ipsec.d/<ns>/ipsec.{conf,secrets} OVER these two files, so the contents
+# below are only used by a (normally disabled) global charon. They MUST still
+# exist on disk because they are the bind-mount targets — an absent target makes
+# `mount --bind` fail and the tunnel won't start. Do not delete them.
+cat > /etc/ipsec.conf << 'EOF'
+# /etc/ipsec.conf — base placeholder for jinom-vpn.
+# Per-tunnel charon instances bind-mount their own config over this file.
 config setup
     charondebug="ike 1, knl 1, cfg 0"
     uniqueids=no
-
-include /etc/ipsec.d/*.conf
 EOF
 
-# Secrets file — include per-tunnel secrets
 cat > /etc/ipsec.secrets << 'EOF'
-# /etc/ipsec.secrets — include per-tunnel PSKs
-include /etc/ipsec.d/*.secrets
+# /etc/ipsec.secrets — base placeholder for jinom-vpn.
+# Per-tunnel charon instances bind-mount their own secrets over this file.
 EOF
 
 chmod 600 /etc/ipsec.secrets

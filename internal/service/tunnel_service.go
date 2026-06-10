@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -443,12 +446,8 @@ func (s *TunnelService) Reconcile(ctx context.Context) {
 
 	for i := range tunnels {
 		t := &tunnels[i]
-		ifName := fmt.Sprintf("wg-%s", t.Namespace)
-		if t.VPNType == tunnel.VPNTypeL2TP {
-			ifName = fmt.Sprintf("l2tp-%s", t.Namespace)
-		}
 
-		if s.interfaceUpInNS(t.Namespace, ifName) {
+		if s.tunnelRuntimeHealthy(t) {
 			s.log.Debug("Reconcile: tunnel already healthy", zap.String("id", t.ID.String()))
 			continue
 		}
@@ -483,6 +482,73 @@ func (s *TunnelService) Reconcile(ctx context.Context) {
 		}
 		s.log.Info("Reconcile: tunnel restored", zap.String("id", t.ID.String()))
 	}
+}
+
+// RecoverTunnel tears down and re-sets-up a tunnel's host-side runtime under
+// the SAME setupMu that Activate/Deactivate/Provision/Delete hold. The health
+// monitor calls this (via a hook) instead of touching wgSvc/l2tpSvc directly,
+// so an automatic recovery can never race a concurrent operator action on the
+// same namespace, iptables chain, or chap-secrets file.
+//
+// It returns the setup error (if any) but does NOT change persisted status —
+// the caller (health monitor) owns the status/last_error/history transitions.
+func (s *TunnelService) RecoverTunnel(t *tunnel.ResellerTunnel) error {
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	if !s.nsSvc.Exists(t.Namespace) {
+		if err := s.nsSvc.Create(t.Namespace); err != nil {
+			return fmt.Errorf("recover: create namespace: %w", err)
+		}
+	}
+
+	switch t.VPNType {
+	case tunnel.VPNTypeWireGuard:
+		_ = s.wgSvc.Teardown(t)
+		return s.wgSvc.Setup(t)
+	case tunnel.VPNTypeL2TP:
+		_ = s.l2tpSvc.Teardown(t)
+		return s.l2tpSvc.Setup(t)
+	}
+	return fmt.Errorf("recover: unknown vpn type %q", t.VPNType)
+}
+
+// tunnelRuntimeHealthy reports whether a tunnel's host-side runtime is already
+// in place, so Reconcile can skip re-running Setup. The check differs per type:
+//
+//   - WireGuard creates a real wg-<ns> interface in the namespace; presence +
+//     UP/UNKNOWN oper-state is an accurate liveness signal.
+//   - L2TP has NO l2tp-<ns> interface on the VPS side — the ppp* interface only
+//     appears when the MikroTik actually dials in, which may legitimately not
+//     have happened yet. Probing a fictional interface always failed, so every
+//     boot re-ran Setup needlessly. Instead we require the namespace to exist
+//     and the per-tunnel xl2tpd process to be alive; charon/xl2tpd are what
+//     Setup brings up, so their presence means the runtime is provisioned.
+func (s *TunnelService) tunnelRuntimeHealthy(t *tunnel.ResellerTunnel) bool {
+	if !s.nsSvc.Exists(t.Namespace) {
+		return false
+	}
+	if t.VPNType == tunnel.VPNTypeL2TP {
+		return s.l2tpDaemonsAlive(t.Namespace)
+	}
+	return s.interfaceUpInNS(t.Namespace, fmt.Sprintf("wg-%s", t.Namespace))
+}
+
+// l2tpDaemonsAlive returns true if this namespace's xl2tpd process (recorded in
+// its per-tunnel pidfile) is running. /run is tmpfs, so after a reboot the
+// pidfile is gone and this returns false, correctly triggering re-Setup.
+func (s *TunnelService) l2tpDaemonsAlive(ns string) bool {
+	pidPath := filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", ns))
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return false
+	}
+	pid := strings.TrimSpace(string(data))
+	if pid == "" {
+		return false
+	}
+	// kill -0 probes liveness without signalling.
+	return exec.Command("kill", "-0", pid).Run() == nil
 }
 
 func (s *TunnelService) interfaceUpInNS(ns, ifName string) bool {

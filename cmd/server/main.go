@@ -81,6 +81,11 @@ func main() {
 	// monitor — jaga supaya `states` tidak tumbuh tak terbatas saat banyak
 	// tunnel dibuat & dihapus.
 	tunnelSvc.SetOnDeleteHook(healthMonitor.Forget)
+	// Route automatic recovery through TunnelService so it runs under the same
+	// setupMu as operator actions (activate/deactivate/delete), preventing a
+	// health-triggered teardown+setup from racing a concurrent API call on the
+	// same namespace/iptables/chap-secrets state.
+	healthMonitor.SetRecoverHook(tunnelSvc.RecoverTunnel)
 	healthMonitor.Start()
 	defer healthMonitor.Stop()
 

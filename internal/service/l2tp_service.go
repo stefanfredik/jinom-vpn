@@ -78,8 +78,14 @@ if [ -n "$6" ] && [ -f "/etc/ppp/routes.$6" ]; then
     done < "/etc/ppp/routes.$6"
 fi
 `
-	_ = os.MkdirAll("/etc/ppp/ip-up.d", 0755)
-	_ = os.WriteFile(scriptPath, []byte(scriptContent), 0755)
+	if err := os.MkdirAll("/etc/ppp/ip-up.d", 0755); err != nil {
+		s.log.Warn("Failed to create /etc/ppp/ip-up.d; per-tunnel routes will not auto-install", zap.Error(err))
+		return
+	}
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		s.log.Warn("Failed to install ip-up route hook; per-tunnel routes will not auto-install",
+			zap.String("path", scriptPath), zap.Error(err))
+	}
 }
 
 func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
@@ -176,9 +182,15 @@ func indexToVethIPs(index int) (hostIP, nsIP, nsIPNoMask, subnet string) {
 	return
 }
 
+// deleteRule repeatedly deletes a matching iptables rule until no more copies
+// remain. The "-w" flag makes iptables wait for the xtables lock instead of
+// failing instantly when another setup/teardown runs concurrently — without it
+// a lock contention would look like "rule absent" and stop the loop early,
+// leaving duplicate rules behind.
 func (s *L2TPService) deleteRule(args ...string) {
 	for {
-		if exec.Command("iptables", args...).Run() != nil {
+		full := append([]string{"-w"}, args...)
+		if exec.Command("iptables", full...).Run() != nil {
 			break
 		}
 	}
@@ -247,20 +259,26 @@ func (s *L2TPService) setupRouting(runCmd func(string, ...string) error, t *tunn
 
 	// s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", s.vpsPublicIP+"/32", "dev", vethNs)
 
+	// ipt wraps runCmd with the "-w" flag so every rule mutation waits for the
+	// xtables lock instead of failing under concurrent setup/teardown.
+	ipt := func(args ...string) error {
+		return runCmd("iptables", append([]string{"-w"}, args...)...)
+	}
+
 	// Use DNAT to redirect IPSec/L2TP traffic from router to namespace.
 	// Policy routing cannot work because the host's local table (priority 0)
 	// intercepts packets destined for vpsPublicIP before custom rules are checked.
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
-	runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
+	ipt("-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", nsIPNoMask+":500")
+	ipt("-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", nsIPNoMask+":4500")
+	ipt("-t", "nat", "-A", "PREROUTING", "-s", routerHost, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", nsIPNoMask+":1701")
 
-	runCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-s", nsIPNoMask, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
-	runCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "2", "-s", nsIPNoMask, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
-	runCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "3", "-s", nsIPNoMask, "-p", "udp", "--sport", "1701", "-j", "SNAT", "--to-source", s.vpsPublicIP+":1701")
-	runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE")
-	runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", t.ClientIPAddress, "-j", "MASQUERADE")
-	runCmd("iptables", "-t", "filter", "-I", "FORWARD", "1", "-d", nsIPNoMask, "-j", "ACCEPT")
-	runCmd("iptables", "-t", "filter", "-I", "FORWARD", "1", "-s", nsIPNoMask, "-j", "ACCEPT")
+	ipt("-t", "nat", "-I", "POSTROUTING", "1", "-s", nsIPNoMask, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
+	ipt("-t", "nat", "-I", "POSTROUTING", "2", "-s", nsIPNoMask, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
+	ipt("-t", "nat", "-I", "POSTROUTING", "3", "-s", nsIPNoMask, "-p", "udp", "--sport", "1701", "-j", "SNAT", "--to-source", s.vpsPublicIP+":1701")
+	ipt("-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE")
+	ipt("-t", "nat", "-A", "POSTROUTING", "-s", t.ClientIPAddress, "-j", "MASQUERADE")
+	ipt("-t", "filter", "-I", "FORWARD", "1", "-d", nsIPNoMask, "-j", "ACCEPT")
+	ipt("-t", "filter", "-I", "FORWARD", "1", "-s", nsIPNoMask, "-j", "ACCEPT")
 
 	return nil
 }
@@ -269,38 +287,100 @@ func (s *L2TPService) ipsecConfDir(ns string) string {
 	return fmt.Sprintf("/etc/ipsec.d/%s", ns)
 }
 
-func (s *L2TPService) ipsecEnv(nsConfDir string) []string {
-	return append(os.Environ(),
-		"IPSEC_CONFDIR="+nsConfDir,
-	)
+// ipsecRunDir is the per-tunnel runtime directory bind-mounted over /run inside
+// the tunnel's private mount namespace. strongSwan's `ipsec` wrapper hard-codes
+// IPSEC_PIDDIR=/var/run (a symlink to /run on Ubuntu) and the charon control
+// socket /run/charon.ctl, so charon's pidfiles and control socket all resolve
+// into THIS directory once /run is bound — giving each tunnel a fully isolated
+// charon. /run is tmpfs and cleared on reboot, so nothing leaks across boots.
+func (s *L2TPService) ipsecRunDir(ns string) string {
+	return filepath.Join("/run/ipsec", ns)
+}
+
+// netnsMountExec runs a shell script inside the tunnel's network namespace AND a
+// fresh private mount namespace, so bind-mounts performed by the script (e.g.
+// /run, /etc/ipsec.conf) are confined to that tunnel and never touch the host.
+//
+// Why this isolates a daemon that outlives the command: `ipsec start` forks
+// starter+charon, which inherit the mount ns and keep it alive after the
+// launcher shell exits. Re-entering a fresh mount ns later (stop/statusall) and
+// re-binding the same real host dir over /run exposes the identical charon.pid
+// and charon.ctl inode, so control operations reach exactly this tunnel's charon.
+func (s *L2TPService) netnsMountExec(ns, script string) *exec.Cmd {
+	return exec.Command("ip", "netns", "exec", ns,
+		"unshare", "--mount", "--propagation", "private",
+		"/bin/sh", "-c", script)
 }
 
 func (s *L2TPService) startIPSec(t *tunnel.ResellerTunnel) error {
 	ns := t.Namespace
-	nsConfDir := s.ipsecConfDir(ns)
+	confDir := s.ipsecConfDir(ns)
+	runDir := s.ipsecRunDir(ns)
 
-	s.stopIPSecInNS(ns, nsConfDir)
-	time.Sleep(500 * time.Millisecond)
+	// Best-effort stop of any prior instance for THIS tunnel, then wipe its
+	// runtime dir so a crashed charon can't leave a stale pid/control socket.
+	s.stopIPSecInNS(ns, confDir)
+	_ = os.RemoveAll(runDir)
+	time.Sleep(300 * time.Millisecond)
 
-	mainConf := filepath.Join(nsConfDir, "ipsec.conf")
-	cmd := exec.Command("ip", "netns", "exec", ns, "ipsec", "start", "--conf", mainConf)
-	cmd.Env = s.ipsecEnv(nsConfDir)
-	out, err := cmd.CombinedOutput()
+	// Bind /run -> per-tunnel runDir (isolates charon.pid/ctl), and bind this
+	// tunnel's ipsec.conf/ipsec.secrets over the wrapper's hard-coded /etc paths
+	// so the PSK and conn actually load. `set -e`: every bind must succeed.
+	script := fmt.Sprintf(`set -e
+mkdir -p %[1]s
+mount --bind %[1]s /run
+mount --bind %[2]s/ipsec.conf /etc/ipsec.conf
+mount --bind %[2]s/ipsec.secrets /etc/ipsec.secrets
+exec ipsec start`, runDir, confDir)
+
+	out, err := s.netnsMountExec(ns, script).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ipsec start: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	time.Sleep(2 * time.Second)
 
-	out, _ = s.nsSvc.ExecInNS(ns, "ipsec", "statusall")
-	s.log.Info("IPSec status after start", zap.String("namespace", ns), zap.String("status", string(out)))
+	statusOut, _ := s.IPSecStatusall(ns)
+	s.log.Info("IPSec status after start", zap.String("namespace", ns), zap.String("status", string(statusOut)))
 
 	return nil
 }
 
-func (s *L2TPService) stopIPSecInNS(ns, nsConfDir string) {
-	cmd := exec.Command("ip", "netns", "exec", ns, "ipsec", "stop")
-	cmd.Env = s.ipsecEnv(nsConfDir)
-	cmd.CombinedOutput()
+// IPSecStatusall queries ONLY this tunnel's charon via its private control
+// socket (charon.ctl inside ipsecRunDir), by re-binding /run in a fresh mount
+// namespace. Used by startIPSec verification and by the health monitor so SA
+// counts never bleed across tunnels.
+func (s *L2TPService) IPSecStatusall(ns string) ([]byte, error) {
+	runDir := s.ipsecRunDir(ns)
+	script := fmt.Sprintf(`mkdir -p %[1]s; mount --bind %[1]s /run; exec ipsec statusall`, runDir)
+	return s.netnsMountExec(ns, script).CombinedOutput()
+}
+
+// stopIPSecInNS stops ONLY this tunnel's charon. It binds /run to the tunnel's
+// runtime dir (so `ipsec stop` reads this tunnel's starter.charon.pid) and then
+// hard-kills by the per-tunnel pidfiles as a backstop. It never uses a global
+// `pkill charon`, which would take down every tunnel. The confDir arg is unused
+// now (conf binding is only needed for start) but kept for caller stability.
+func (s *L2TPService) stopIPSecInNS(ns, _ string) {
+	runDir := s.ipsecRunDir(ns)
+
+	// No `set -e` and no conf binds: during Teardown the config files may be
+	// gone, but `ipsec stop` only needs /run to find the pidfile.
+	stop := fmt.Sprintf(`mkdir -p %[1]s; mount --bind %[1]s /run; exec ipsec stop`, runDir)
+	_, _ = s.netnsMountExec(ns, stop).CombinedOutput()
+
+	// Backstop: PIDs are global (no PID-ns), so a bare `kill <pid>` from the
+	// host reaches this tunnel's charon/starter even if `ipsec stop` failed.
+	for _, f := range []string{"charon.pid", "starter.charon.pid"} {
+		if data, err := os.ReadFile(filepath.Join(runDir, f)); err == nil {
+			if pid := strings.TrimSpace(string(data)); pid != "" {
+				_ = exec.Command("kill", pid).Run()
+			}
+		}
+	}
+}
+
+func (s *L2TPService) xl2tpdControlPath(ns string) string {
+	return filepath.Join("/run/xl2tpd", fmt.Sprintf("%s-control", ns))
 }
 
 func (s *L2TPService) startXL2TPD(ns string) error {
@@ -308,13 +388,22 @@ func (s *L2TPService) startXL2TPD(ns string) error {
 
 	confPath := filepath.Join("/etc/xl2tpd", fmt.Sprintf("%s.conf", ns))
 	pidPath := filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", ns))
+	ctlPath := s.xl2tpdControlPath(ns)
 
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
 		return fmt.Errorf("config file not found: %s", confPath)
 	}
 
+	// xl2tpd defaults its control socket to the global /run/xl2tpd/l2tp-control,
+	// which would collide across namespaces (netns does not isolate the
+	// filesystem). A per-tunnel -C path keeps each instance independent.
+	if err := os.MkdirAll("/run/xl2tpd", 0755); err != nil {
+		return fmt.Errorf("create xl2tpd control dir: %w", err)
+	}
+	_ = os.Remove(ctlPath) // drop a stale socket from a crashed instance
+
 	cmd := exec.Command("ip", "netns", "exec", ns,
-		"xl2tpd", "-c", confPath, "-p", pidPath)
+		"xl2tpd", "-c", confPath, "-p", pidPath, "-C", ctlPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	out, err := cmd.CombinedOutput()
@@ -346,6 +435,8 @@ func (s *L2TPService) killXL2TPD(ns string) {
 	// Also kill any lingering xl2tpd using this config
 	_, _ = s.nsSvc.ExecInNS(ns, "pkill", "-f", fmt.Sprintf("xl2tpd.*%s.conf", ns))
 	time.Sleep(200 * time.Millisecond)
+
+	_ = os.Remove(s.xl2tpdControlPath(ns))
 }
 
 func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
@@ -365,12 +456,37 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 
 	confDir := s.ipsecConfDir(t.Namespace)
 	_ = os.RemoveAll(confDir)
+	_ = os.RemoveAll(s.ipsecRunDir(t.Namespace))
 	_ = os.Remove(filepath.Join("/etc/xl2tpd", t.Namespace+".conf"))
 	_ = os.Remove(filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", t.Namespace)))
+	_ = os.Remove(s.xl2tpdControlPath(t.Namespace))
 	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("options.%s", t.Namespace)))
 	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace)))
 
 	return nil
+}
+
+// buildConnConf renders the strongSwan `conn` block. The cipher proposals list
+// strong, modern algorithms FIRST (aes256-sha256-modp2048) so capable routers
+// negotiate them, then keep legacy fallbacks (down to 3des-sha1) for old
+// RouterOS 6 devices. Both proposal sets are strict ("!") so nothing weaker
+// than what's listed can be silently negotiated. left is the namespace veth IP,
+// leftid the VPS public IP, right the router host (port already stripped).
+func (s *L2TPService) buildConnConf(connName, leftIP, routerHost string) string {
+	return fmt.Sprintf(`conn %s
+    authby=secret
+    auto=add
+    type=transport
+    leftfirewall=yes
+    left=%s
+    leftid=%s
+    right=%s
+    keyingtries=3
+    ikelifetime=28800s
+    lifetime=3600s
+    ike=aes256-sha256-modp2048,aes128-sha256-modp2048,aes128-sha1-modp1024,aes128-md5-modp1024,3des-sha1-modp1024!
+    esp=aes256-sha256,aes256-sha1,aes128-sha1,aes128-sha1-modp1024,3des-sha1!
+`, connName, leftIP, s.vpsPublicIP, routerHost)
 }
 
 func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask string) error {
@@ -382,20 +498,7 @@ func (s *L2TPService) writeIPSecConfig(t *tunnel.ResellerTunnel, nsIPNoMask stri
 	}
 
 	routerHost := stripPort(t.RouterIP)
-	connConf := fmt.Sprintf(`conn %s
-    authby=secret
-    auto=add
-    type=transport
-    leftfirewall=yes
-    left=%s
-    leftid=%s
-    right=%s
-    keyingtries=3
-    ikelifetime=28800s
-    lifetime=3600s
-    ike=aes128-sha1-modp1024,aes128-md5-modp1024,3des-sha1-modp1024!
-    esp=aes256-sha1-modp1024,aes192-sha1-modp1024,aes128-sha1-modp1024!
-`, connName, nsIPNoMask, s.vpsPublicIP, routerHost)
+	connConf := s.buildConnConf(connName, nsIPNoMask, routerHost)
 
 	connPath := filepath.Join(nsConfDir, connName+".conf")
 	if err := os.WriteFile(connPath, []byte(connConf), 0600); err != nil {

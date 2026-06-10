@@ -12,6 +12,10 @@ type Repository interface {
 	FindByResellerID(ctx context.Context, resellerID int64) (*ResellerTunnel, error)
 	FindByNamespace(ctx context.Context, namespace string) (*ResellerTunnel, error)
 	FindActive(ctx context.Context) ([]ResellerTunnel, error)
+	// FindActiveOrDown returns tunnels in 'active' OR 'down' state. The health
+	// monitor uses this so a tunnel previously marked 'down' keeps being probed
+	// and can transition back to 'active' once it recovers.
+	FindActiveOrDown(ctx context.Context) ([]ResellerTunnel, error)
 	NextTunnelIndex(ctx context.Context) (int, error)
 	Save(ctx context.Context, t *ResellerTunnel) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status Status, lastError string) error

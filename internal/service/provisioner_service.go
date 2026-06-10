@@ -137,10 +137,12 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 			t.L2TPUsername, t.L2TPPassword, t.PSK)
 	}
 
+	// Never log PSK material (even a prefix). t.PSK[:8] would also panic for a
+	// short legacy PSK. Log only its length for debugging.
 	s.log.Info("L2TP provisioning parameters",
 		zap.String("username", t.L2TPUsername),
 		zap.String("vps_ip", vpsIP),
-		zap.String("psk_first_chars", t.PSK[:8]+"***"),
+		zap.Int("psk_len", len(t.PSK)),
 	)
 
 	// Find and remove existing interface - MUST disable first to allow proper cleanup

@@ -30,7 +30,7 @@ VPN tunnel management service for Jinom NMS multi-reseller isolation. Manages Wi
               +----------------------------+----------------------------+
               |                            |                            |
         TunnelService              ProvisionerService          HealthMonitorService
-              |                            |                     (background, 30s)
+              |                            |                     (background, 60s)
      +--------+--------+          MikroTik API Client                   |
      |                  |          (RouterOS :8728)               ping per-tunnel
 NamespaceService    WireGuardService / L2TPService                      |
@@ -1041,7 +1041,7 @@ Deactivate (jika active) lalu hapus record dari database.
            [ active ]         [ error ]
                 |                  |
        health monitor       POST /{id}/activate  (retry)
-          (every 30s)              |
+          (every 60s)              |
                 |                  v
          3x ping fail        [ provisioning ] ...
                 |
@@ -1078,10 +1078,11 @@ Background goroutine yang berjalan otomatis saat service start.
 
 | Parameter | Nilai |
 |-----------|-------|
-| Check interval | 30 detik |
-| Failure threshold | 3 kali berturut-turut |
+| Check interval | 60 detik |
+| Failure threshold | 5 kali berturut-turut |
 | Ping timeout | 3 detik per tunnel |
-| Ping count | 1 packet |
+| Ping count | 2 packet |
+| Max recovery attempts | 3 (cooldown 5 menit) |
 
 **Alur:**
 

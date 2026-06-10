@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,6 +39,17 @@ type HealthMonitorService struct {
 	wg         sync.WaitGroup
 	states     map[string]*tunnelHealthState
 	mu         sync.Mutex
+	// recoverFn performs a locked teardown+setup of a tunnel. Injected by
+	// SetRecoverHook (wired to TunnelService.RecoverTunnel) so recovery runs
+	// under the same setupMu as operator actions, avoiding races. Optional —
+	// if nil, attemptRecovery falls back to direct wg/l2tp calls (unlocked).
+	recoverFn func(t *tunnel.ResellerTunnel) error
+}
+
+// SetRecoverHook registers the function used to recover an unhealthy tunnel.
+// Wired in main.go to TunnelService.RecoverTunnel so recovery holds setupMu.
+func (s *HealthMonitorService) SetRecoverHook(fn func(t *tunnel.ResellerTunnel) error) {
+	s.recoverFn = fn
 }
 
 func NewHealthMonitorService(
@@ -121,9 +130,12 @@ func (s *HealthMonitorService) Forget(id string) {
 }
 
 func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
-	tunnels, err := s.repo.FindActive(ctx)
+	// Include 'down' tunnels, not just 'active': a tunnel marked down must keep
+	// being probed so handleSuccess can transition it back to active once it
+	// recovers. Probing active-only would leave 'down' a terminal state.
+	tunnels, err := s.repo.FindActiveOrDown(ctx)
 	if err != nil {
-		s.log.Error("Failed to fetch active tunnels", zap.Error(err))
+		s.log.Error("Failed to fetch tunnels for health check", zap.Error(err))
 		return
 	}
 
@@ -250,32 +262,40 @@ func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.Rese
 		return
 	}
 
-	if count == s.failThreshold {
+	// At/over threshold every tick now. Attempt recovery if allowed; the
+	// cooldown + maxRecoveries cap keep it from firing more than once per 5
+	// minutes and no more than maxRecoveries times. We deliberately key on
+	// count >= threshold (not == threshold): after the cooldown expires the
+	// failCount is already past the threshold, and an exact-match check would
+	// permanently stop retrying.
+	s.mu.Lock()
+	canRecover := st.recoveryCount < s.maxRecoveries &&
+		time.Since(st.lastRecovery) > 5*time.Minute
+	if canRecover {
+		st.recoveryCount++
+		st.lastRecovery = time.Now()
+		st.failCount = 0 // give the recovered tunnel a fresh failure budget
+	}
+	s.mu.Unlock()
+
+	if canRecover {
 		s.log.Warn("Tunnel unhealthy, attempting recovery",
 			zap.String("tunnel_id", t.ID.String()),
 			zap.String("namespace", t.Namespace),
 			zap.String("reason", reason),
 			zap.Int("consecutive_failures", count),
 		)
-
-		s.mu.Lock()
-		canRecover := st.recoveryCount < s.maxRecoveries &&
-			time.Since(st.lastRecovery) > 5*time.Minute
-		if canRecover {
-			st.recoveryCount++
-			st.lastRecovery = time.Now()
-			st.failCount = 0
-		}
-		s.mu.Unlock()
-
-		if canRecover {
-			s.attemptRecovery(ctx, t)
-			return
-		}
+		s.attemptRecovery(ctx, t)
+		return
 	}
 
-	if count == s.failThreshold && !s.canRecover(t.ID.String()) {
-		s.log.Warn("Tunnel marked as down (max recoveries exhausted)",
+	// Cannot recover right now (max attempts used up, or still within the
+	// 5-minute cooldown). Mark the tunnel down so its status reflects reality.
+	// Only write when not already down, so a persistently failing tunnel
+	// doesn't rewrite the same status + history row every tick. A later
+	// successful probe transitions it back to active via handleSuccess.
+	if t.Status != tunnel.StatusDown {
+		s.log.Warn("Tunnel marked as down (recovery unavailable)",
 			zap.String("tunnel_id", t.ID.String()),
 			zap.String("namespace", t.Namespace),
 			zap.String("reason", reason),
@@ -289,16 +309,6 @@ func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.Rese
 	}
 }
 
-func (s *HealthMonitorService) canRecover(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.states[id]
-	if st == nil {
-		return true
-	}
-	return st.recoveryCount < s.maxRecoveries
-}
-
 func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.ResellerTunnel) {
 	s.log.Info("Attempting tunnel recovery",
 		zap.String("tunnel_id", t.ID.String()),
@@ -306,14 +316,21 @@ func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.Re
 		zap.String("vpn_type", string(t.VPNType)),
 	)
 
+	// Prefer the locked recovery hook (TunnelService.RecoverTunnel) so the
+	// teardown+setup runs under setupMu and can't race a concurrent operator
+	// action. Fall back to direct, unlocked calls only if no hook was wired.
 	var err error
-	switch t.VPNType {
-	case tunnel.VPNTypeWireGuard:
-		_ = s.wgSvc.Teardown(t)
-		err = s.wgSvc.Setup(t)
-	case tunnel.VPNTypeL2TP:
-		_ = s.l2tpSvc.Teardown(t)
-		err = s.l2tpSvc.Setup(t)
+	if s.recoverFn != nil {
+		err = s.recoverFn(t)
+	} else {
+		switch t.VPNType {
+		case tunnel.VPNTypeWireGuard:
+			_ = s.wgSvc.Teardown(t)
+			err = s.wgSvc.Setup(t)
+		case tunnel.VPNTypeL2TP:
+			_ = s.l2tpSvc.Teardown(t)
+			err = s.l2tpSvc.Setup(t)
+		}
 	}
 
 	if err != nil {
@@ -342,15 +359,14 @@ const wgHandshakeStaleAfter = 3 * time.Minute
 
 var ipsecSAUpRegex = regexp.MustCompile(`Security Associations \((\d+) up,`)
 
-// checkL2TPViaIPSec evaluates an L2TP tunnel by inspecting its IPSec SA state
-// inside the namespace. Returns true if the verdict was decided here (so the
-// caller skips the ICMP fallback). When strongSwan output can't be parsed at
-// all we return false and let ping take over.
+// checkL2TPViaIPSec evaluates an L2TP tunnel by inspecting THIS tunnel's IPSec
+// SA state via its isolated charon (IPSecStatusall re-binds /run to the
+// per-tunnel runtime dir, so the count reflects only this tunnel — never SAs
+// belonging to another namespace's charon). Returns true if the verdict was
+// decided here (so the caller skips the ICMP fallback). When strongSwan output
+// can't be parsed at all we return false and let ping take over.
 func (s *HealthMonitorService) checkL2TPViaIPSec(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) bool {
-	confDir := fmt.Sprintf("/etc/ipsec.d/%s", t.Namespace)
-	cmd := exec.Command("ip", "netns", "exec", t.Namespace, "ipsec", "statusall")
-	cmd.Env = append(os.Environ(), "IPSEC_CONFDIR="+confDir)
-	out, err := cmd.CombinedOutput()
+	out, err := s.l2tpSvc.IPSecStatusall(t.Namespace)
 	if err != nil {
 		s.log.Debug("ipsec statusall failed, falling back to ping",
 			zap.String("namespace", t.Namespace), zap.Error(err))
@@ -366,8 +382,11 @@ func (s *HealthMonitorService) checkL2TPViaIPSec(ctx context.Context, t *tunnel.
 		return false
 	}
 
-	s.repo.SaveMetric(ctx, metric)
+	// Only persist a metric row when the SA is up: this path collects no
+	// latency/loss/bytes, so saving on every failing tick would just pile up
+	// empty rows. handleSuccess/handleFailure carry the state transition.
 	if up > 0 {
+		s.repo.SaveMetric(ctx, metric)
 		s.handleSuccess(ctx, t)
 	} else {
 		s.handleFailure(ctx, t, "no ipsec SA established")

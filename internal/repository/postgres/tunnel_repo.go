@@ -165,6 +165,22 @@ func (r *TunnelRepository) FindActive(ctx context.Context) ([]tunnel.ResellerTun
 	return tunnels, nil
 }
 
+func (r *TunnelRepository) FindActiveOrDown(ctx context.Context) ([]tunnel.ResellerTunnel, error) {
+	var records []tunnelRecord
+	err := r.db.DB.SelectContext(ctx, &records,
+		`SELECT * FROM reseller_tunnels WHERE status IN ($1, $2) ORDER BY created_at`,
+		tunnel.StatusActive, tunnel.StatusDown)
+	if err != nil {
+		return nil, fmt.Errorf("find active-or-down tunnels: %w", err)
+	}
+
+	tunnels := make([]tunnel.ResellerTunnel, len(records))
+	for i := range records {
+		tunnels[i] = *r.mapToDomain(&records[i])
+	}
+	return tunnels, nil
+}
+
 func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) error {
 	if t.ID == uuid.Nil {
 		t.ID = uuid.New()
@@ -374,12 +390,48 @@ func (r *TunnelRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// maxTunnelIndex is the largest index that indexToVethIPs / indexToSubnet can
+// turn into a valid address: both derive the 3rd octet from index/64, so once
+// index/64 > 255 the generated IP (e.g. 10.254.256.x) is invalid. 255*64+63.
+const maxTunnelIndex = 16383
+
+// tunnelIndexAdvisoryLock is an arbitrary, stable 64-bit key for
+// pg_advisory_xact_lock. It serializes concurrent MAX(tunnel_index)+1 reads so
+// two simultaneous Create calls don't both read the same max in lock-step.
+//
+// Note: the subsequent INSERT happens in a separate Save() call, so the lock
+// alone cannot fully close the read-then-insert window. The ultimate guarantee
+// against duplicate indices is the partial UNIQUE INDEX idx_tunnel_index on
+// reseller_tunnels(tunnel_index): a colliding second Save fails loudly with a
+// unique violation (a retryable error) instead of silently provisioning two
+// tunnels onto the same veth/subnet. The lock simply makes collisions rare.
+const tunnelIndexAdvisoryLock = 0x6a696e6f6d767061 // "jinomvpa"
+
 func (r *TunnelRepository) NextTunnelIndex(ctx context.Context) (int, error) {
-	var next int
-	err := r.db.DB.GetContext(ctx, &next,
-		`SELECT COALESCE(MAX(tunnel_index), 0) + 1 FROM reseller_tunnels`)
+	tx, err := r.db.DB.BeginTxx(ctx, nil)
 	if err != nil {
+		return 0, fmt.Errorf("next tunnel index: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Serialize allocation across connections. The lock is released
+	// automatically when the transaction ends (commit or rollback).
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(tunnelIndexAdvisoryLock)); err != nil {
+		return 0, fmt.Errorf("next tunnel index: acquire advisory lock: %w", err)
+	}
+
+	var next int
+	if err := tx.GetContext(ctx, &next,
+		`SELECT COALESCE(MAX(tunnel_index), 0) + 1 FROM reseller_tunnels`); err != nil {
 		return 0, fmt.Errorf("next tunnel index: %w", err)
+	}
+
+	if next > maxTunnelIndex {
+		return 0, fmt.Errorf("tunnel index pool exhausted: next=%d exceeds max=%d", next, maxTunnelIndex)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("next tunnel index: commit: %w", err)
 	}
 	return next, nil
 }
