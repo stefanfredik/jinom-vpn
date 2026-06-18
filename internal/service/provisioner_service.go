@@ -61,6 +61,9 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 		c.Run("/ip/route/remove", map[string]string{".id": resRoute[0][".id"]})
 	}
 
+	// Find and remove existing NAT rule
+	s.removeNATByComment(c, "JINOM NMS")
+
 	// Find and remove existing IP address
 	resIp, err := c.Run("/ip/address/print", map[string]string{"?interface": "wg-jinom"})
 	if err == nil && len(resIp) > 0 {
@@ -118,6 +121,15 @@ func (s *ProvisionerService) provisionWireGuard(c *mikrotik.Client, t *tunnel.Re
 				"dst-address": "10.250.0.0/16",
 				"gateway":     "wg-jinom",
 				"comment":     "jinom-nms",
+			},
+		},
+		{
+			Path: "/ip/firewall/nat/add",
+			Params: map[string]string{
+				"chain":       "srcnat",
+				"action":      "masquerade",
+				"src-address": "10.250.0.0/16",
+				"comment":     "JINOM NMS",
 			},
 		},
 	}
@@ -201,6 +213,9 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	// Find and remove existing NAT rule
+	s.removeNATByComment(c, "JINOM NMS")
+
 	// Create L2TP client interface
 	commands := []mikrotik.Command{
 		{
@@ -260,6 +275,22 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 			zap.Error(errRoute),
 		)
 		// Don't fail on route error - interface is created, route can be added manually
+	}
+
+	// Add NAT masquerade
+	errNAT := c.RunCommand(mikrotik.Command{
+		Path: "/ip/firewall/nat/add",
+		Params: map[string]string{
+			"chain":       "srcnat",
+			"action":      "masquerade",
+			"src-address": "10.250.0.0/16",
+			"comment":     "JINOM NMS",
+		},
+	})
+	if errNAT != nil {
+		s.log.Error("Failed to add NAT masquerade to L2TP interface",
+			zap.Error(errNAT),
+		)
 	}
 
 	return nil
@@ -324,6 +355,7 @@ func (s *ProvisionerService) deprovisionWireGuard(c *mikrotik.Client) {
 
 	s.removeAddressOnInterface(c, "wg-jinom")
 	s.removeRouteByComment(c, "jinom-nms")
+	s.removeNATByComment(c, "JINOM NMS")
 
 	if res, err := c.Run("/interface/wireguard/print", map[string]string{"?name": "wg-jinom"}); err == nil && len(res) > 0 {
 		if err := c.RunCommand(mikrotik.Command{
@@ -341,6 +373,7 @@ func (s *ProvisionerService) deprovisionWireGuard(c *mikrotik.Client) {
 func (s *ProvisionerService) deprovisionL2TP(c *mikrotik.Client) {
 	s.removeAddressOnInterface(c, "l2tp-jinom")
 	s.removeRouteByComment(c, "jinom-nms")
+	s.removeNATByComment(c, "JINOM NMS")
 
 	if res, err := c.Run("/interface/l2tp-client/print", map[string]string{"?name": "l2tp-jinom"}); err == nil && len(res) > 0 {
 		// Disable dulu agar tunnel turun bersih sebelum dihapus, sama
@@ -385,6 +418,25 @@ func (s *ProvisionerService) removeAddressOnInterface(c *mikrotik.Client, iface 
 // removeRouteByComment menghapus semua /ip/route dengan comment tertentu.
 // Kami pakai comment "jinom-nms" sebagai marker eksklusif, jadi aman
 // menghapus semua match-nya.
+// removeNATByComment menghapus semua /ip/firewall/nat dengan comment tertentu.
+func (s *ProvisionerService) removeNATByComment(c *mikrotik.Client, comment string) {
+	rules, err := c.Run("/ip/firewall/nat/print", map[string]string{"?comment": comment})
+	if err != nil {
+		return
+	}
+	for _, r := range rules {
+		if id := r[".id"]; id != "" {
+			if err := c.RunCommand(mikrotik.Command{
+				Path:   "/ip/firewall/nat/remove",
+				Params: map[string]string{".id": id},
+			}); err != nil {
+				s.log.Warn("Deprovision: remove NAT rule failed",
+					zap.String("comment", comment), zap.String("id", id), zap.Error(err))
+			}
+		}
+	}
+}
+
 func (s *ProvisionerService) removeRouteByComment(c *mikrotik.Client, comment string) {
 	routes, err := c.Run("/ip/route/print", map[string]string{"?comment": comment})
 	if err != nil {
