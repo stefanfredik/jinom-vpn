@@ -179,15 +179,16 @@ require-mschap-v2
 ms-dns 8.8.8.8
 ms-dns 8.8.4.4
 asyncmap 0
-auth
-crtscts
-lock
+noccp
+novj
+novjccomp
+nobsdcomp
+nodeflate
 hide-password
-modem
 debug
 name jinom-vpn
-noproxyarp
-lcp-echo-interval 30
+proxyarp
+lcp-echo-interval 15
 lcp-echo-failure 4
 mtu 1400
 mru 1400
@@ -195,17 +196,15 @@ EOF
 
 ok "PPP options configured"
 
-# ── 8. Stop default services ─────────────────────────────────────────────────
-# jinom-vpn manages these per-namespace, don't run globally
-info "Disabling global StrongSwan and xl2tpd services..."
-info "(jinom-vpn manages these per-tunnel inside network namespaces)"
+# jinom-vpn: Runs these as global daemons on the host
+info "Enabling and starting global StrongSwan and xl2tpd services..."
 
-systemctl stop strongswan-starter 2>/dev/null || true
-systemctl disable strongswan-starter 2>/dev/null || true
-systemctl stop xl2tpd 2>/dev/null || true
-systemctl disable xl2tpd 2>/dev/null || true
+systemctl enable strongswan-starter 2>/dev/null || true
+systemctl start strongswan-starter 2>/dev/null || true
+systemctl enable xl2tpd 2>/dev/null || true
+systemctl start xl2tpd 2>/dev/null || true
 
-ok "Global services disabled (will be started per-namespace by jinom-vpn)"
+ok "Global services enabled and started (managed globally by jinom-vpn)"
 
 # ── 9. Firewall rules ────────────────────────────────────────────────────────
 info "Configuring firewall rules..."

@@ -8,7 +8,7 @@ MAIN_FILE := cmd/server/main.go
 CYAN := \033[0;36m
 RESET := \033[0m
 
-.PHONY: all build run test clean dev help
+.PHONY: all build run test clean dev help setup
 
 all: build
 
@@ -17,10 +17,11 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  build         Build the binary"
-	@echo "  run           Run the application"
+	@echo "  run           Run the application as root"
 	@echo "  test          Run tests"
 	@echo "  clean         Remove binary and build artifacts"
-	@echo "  dev           Run the application with hot reload (requires air)"
+	@echo "  dev           Run the application as root with hot reload (requires air)"
+	@echo "  setup         Setup the VPN infrastructure on the host (requires root)"
 
 build:
 	@echo "$(CYAN)Building $(APP_NAME)...$(RESET)"
@@ -28,8 +29,8 @@ build:
 	@go build -o $(BINARY) $(MAIN_FILE)
 
 run: build
-	@echo "$(CYAN)Running $(APP_NAME)...$(RESET)"
-	@./$(BINARY)
+	@echo "$(CYAN)Running $(APP_NAME) as root...$(RESET)"
+	@sudo ./$(BINARY)
 
 test:
 	@echo "$(CYAN)Running tests...$(RESET)"
@@ -41,8 +42,12 @@ clean:
 
 dev:
 	@if command -v air > /dev/null; then \
-		air; \
+		sudo air; \
 	else \
-		echo "$(CYAN)air is not installed. Running with go run...$(RESET)"; \
-		go run $(MAIN_FILE); \
+		echo "$(CYAN)air is not installed. Running with sudo go run...$(RESET)"; \
+		sudo go run $(MAIN_FILE); \
 	fi
+
+setup:
+	@echo "$(CYAN)Setting up VPN infrastructure...$(RESET)"
+	@sudo ./scripts/setup-vpn-infra.sh
