@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -669,11 +670,6 @@ func generatePassword(length int) string {
 }
 
 func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP string, id uuid.UUID) error {
-	t, err := s.repo.FindByID(ctx, id)
-	if err != nil {
-		return fmt.Errorf("get tunnel: %w", err)
-	}
-
 	parts := strings.Split(technicianIP, ".")
 	if len(parts) != 4 {
 		return fmt.Errorf("invalid technician IP format: %s", technicianIP)
@@ -684,16 +680,62 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	}
 	tableID := fmt.Sprintf("%d", 10000+lastOctet)
 
-	// Clean up any existing rules for this technician IP
+	// Attempt to find the corresponding VPN IP if technicianIP is a public IP endpoint in WireGuard
+	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
+
+	if id == uuid.Nil {
+		// Clean up any existing rules for this technician IP and VPN IP
+		_ = exec.Command("ip", "rule", "del", "from", technicianIP, "lookup", tableID).Run()
+		if vpnIP != "" && vpnIP != technicianIP {
+			_ = exec.Command("ip", "rule", "del", "from", vpnIP, "lookup", tableID).Run()
+		}
+		_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+		s.log.Info("Technician cleared reseller tunnel routing",
+			zap.String("technician_ip", technicianIP),
+			zap.String("vpn_ip", vpnIP),
+		)
+		return nil
+	}
+
+	t, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("get tunnel: %w", err)
+	}
+
+	// Clean up any existing rules for this technician IP and VPN IP
 	_ = exec.Command("ip", "rule", "del", "from", technicianIP, "lookup", tableID).Run()
+	if vpnIP != "" && vpnIP != technicianIP {
+		_ = exec.Command("ip", "rule", "del", "from", vpnIP, "lookup", tableID).Run()
+	}
 
 	// Add the ip rule: all packets from technicianIP lookup tableID
 	if err := exec.Command("ip", "rule", "add", "from", technicianIP, "lookup", tableID).Run(); err != nil {
 		return fmt.Errorf("failed to add ip rule: %w", err)
 	}
+	if vpnIP != "" && vpnIP != technicianIP {
+		_ = exec.Command("ip", "rule", "add", "from", vpnIP, "lookup", tableID).Run()
+	}
 
 	// Flush and populate the routing table
 	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+
+	// Add throw routes for all local/host subnets so they are not routed into the namespace
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok {
+				if ipv4 := ipNet.IP.To4(); ipv4 != nil {
+					// Zero out the host bits of the IP net to get a valid route prefix
+					netIP := ipNet.IP.Mask(ipNet.Mask)
+					ones, _ := ipNet.Mask.Size()
+					cidr := fmt.Sprintf("%s/%d", netIP.String(), ones)
+					_ = exec.Command("ip", "route", "add", "throw", cidr, "table", tableID).Run()
+				}
+			}
+		}
+	}
+
+	// Also add throw for loopback range explicitly if not present
+	_ = exec.Command("ip", "route", "add", "throw", "127.0.0.0/8", "table", tableID).Run()
 
 	a := t.TunnelIndex / 64
 	b := (t.TunnelIndex % 64) * 4
@@ -710,6 +752,7 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 
 	s.log.Info("Technician selected reseller tunnel",
 		zap.String("technician_ip", technicianIP),
+		zap.String("vpn_ip", vpnIP),
 		zap.String("tunnel", t.Name),
 		zap.String("veth_host", vethHost),
 		zap.String("ns_ip", nsIPNoMask),
@@ -813,4 +856,33 @@ func getNextFreeIP() (string, int, error) {
 		}
 	}
 	return "", 0, fmt.Errorf("no free IP addresses left in 10.50.0.0/24 range")
+}
+
+func (s *TunnelService) findVPNIPByEndpointIP(endpointIP string) string {
+	out, err := exec.Command("wg", "show", "wg-noc", "dump").Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 4 {
+			endpoint := fields[2]
+			allowedIPs := fields[3]
+			if endpoint != "(none)" && endpoint != "" {
+				host := endpoint
+				if h, _, err := net.SplitHostPort(endpoint); err == nil {
+					host = h
+				}
+				if host == endpointIP {
+					vpnParts := strings.Split(allowedIPs, "/")
+					if len(vpnParts) > 0 {
+						firstIP := strings.Split(vpnParts[0], ",")[0]
+						return strings.TrimSpace(firstIP)
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
