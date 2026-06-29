@@ -366,32 +366,8 @@ var ipsecSAUpRegex = regexp.MustCompile(`Security Associations \((\d+) up,`)
 // decided here (so the caller skips the ICMP fallback). When strongSwan output
 // can't be parsed at all we return false and let ping take over.
 func (s *HealthMonitorService) checkL2TPViaIPSec(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) bool {
-	out, err := s.l2tpSvc.IPSecStatusall(t.Namespace)
-	if err != nil {
-		s.log.Debug("ipsec statusall failed, falling back to ping",
-			zap.String("namespace", t.Namespace), zap.Error(err))
-		return false
-	}
-
-	m := ipsecSAUpRegex.FindStringSubmatch(string(out))
-	if len(m) < 2 {
-		return false
-	}
-	up, perr := strconv.Atoi(m[1])
-	if perr != nil {
-		return false
-	}
-
-	// Only persist a metric row when the SA is up: this path collects no
-	// latency/loss/bytes, so saving on every failing tick would just pile up
-	// empty rows. handleSuccess/handleFailure carry the state transition.
-	if up > 0 {
-		s.repo.SaveMetric(ctx, metric)
-		s.handleSuccess(ctx, t)
-	} else {
-		s.handleFailure(ctx, t, "no ipsec SA established")
-	}
-	return true
+	// Disable IPSec SA check in Global Mode. Rely entirely on ICMP ping which accurately reflects interface health.
+	return false
 }
 
 func (s *HealthMonitorService) checkWireGuard(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jinom/vpn/internal/api"
 	"github.com/jinom/vpn/internal/api/handler"
+	"github.com/jinom/vpn/internal/domain/tunnel"
 	"github.com/jinom/vpn/internal/platform/config"
 	"github.com/jinom/vpn/internal/platform/crypto"
 	"github.com/jinom/vpn/internal/platform/database"
@@ -55,6 +56,22 @@ func main() {
 	}
 
 	tunnelRepo := postgres.NewTunnelRepository(db, cryptoSvc, zapLogger)
+
+	// RUN MIGRATION ONCE: Update all L2TP PSKs to the global one
+	migCtx := context.Background()
+	tuns, _, _ := tunnelRepo.FindAll(migCtx, tunnel.Filter{})
+	for i := range tuns {
+		tun := &tuns[i]
+		if tun.VPNType == "l2tp" && tun.PSK != "JinomGlobalSecret2026!" {
+			tun.PSK = "JinomGlobalSecret2026!"
+			if err := tunnelRepo.Save(migCtx, tun); err != nil {
+				zapLogger.Error("Failed to migrate PSK", zap.String("tunnel", tun.Name), zap.Error(err))
+			} else {
+				zapLogger.Info("Migrated L2TP PSK to Global Secret", zap.String("tunnel", tun.Name))
+			}
+		}
+	}
+	// END MIGRATION
 
 	nsSvc := service.NewNamespaceService(zapLogger)
 	wgSvc := service.NewWireGuardService(nsSvc, zapLogger)

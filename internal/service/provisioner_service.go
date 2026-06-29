@@ -216,8 +216,23 @@ func (s *ProvisionerService) provisionL2TP(c *mikrotik.Client, t *tunnel.Reselle
 	// Find and remove existing NAT rule
 	s.removeNATByComment(c, "JINOM NMS")
 
-	// Create L2TP client interface
+	// Find and remove existing firewall filter rule
+	s.removeFilterByComment(c, "JINOM VPN")
+
+	// Create L2TP client interface & firewall rule
 	commands := []mikrotik.Command{
+		{
+			Path: "/ip/firewall/filter/add",
+			Params: map[string]string{
+				"chain":        "input",
+				"action":       "accept",
+				"protocol":     "udp",
+				"port":         "500,4500,1701",
+				"src-address":  vpsIP,
+				"comment":      "JINOM VPN",
+				"place-before": "0",
+			},
+		},
 		{
 			Path: "/interface/l2tp-client/add",
 			Params: map[string]string{
@@ -374,6 +389,7 @@ func (s *ProvisionerService) deprovisionL2TP(c *mikrotik.Client) {
 	s.removeAddressOnInterface(c, "l2tp-jinom")
 	s.removeRouteByComment(c, "jinom-nms")
 	s.removeNATByComment(c, "JINOM NMS")
+	s.removeFilterByComment(c, "JINOM VPN")
 
 	if res, err := c.Run("/interface/l2tp-client/print", map[string]string{"?name": "l2tp-jinom"}); err == nil && len(res) > 0 {
 		// Disable dulu agar tunnel turun bersih sebelum dihapus, sama
@@ -449,6 +465,24 @@ func (s *ProvisionerService) removeRouteByComment(c *mikrotik.Client, comment st
 				Params: map[string]string{".id": id},
 			}); err != nil {
 				s.log.Warn("Deprovision: remove route failed",
+					zap.String("comment", comment), zap.String("id", id), zap.Error(err))
+			}
+		}
+	}
+}
+
+func (s *ProvisionerService) removeFilterByComment(c *mikrotik.Client, comment string) {
+	rules, err := c.Run("/ip/firewall/filter/print", map[string]string{"?comment": comment})
+	if err != nil {
+		return
+	}
+	for _, r := range rules {
+		if id := r[".id"]; id != "" {
+			if err := c.RunCommand(mikrotik.Command{
+				Path:   "/ip/firewall/filter/remove",
+				Params: map[string]string{".id": id},
+			}); err != nil {
+				s.log.Warn("Deprovision: remove firewall filter rule failed",
 					zap.String("comment", comment), zap.String("id", id), zap.Error(err))
 			}
 		}
