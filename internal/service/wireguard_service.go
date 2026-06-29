@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -99,6 +100,12 @@ func (s *WireGuardService) Setup(t *tunnel.ResellerTunnel) (err error) {
 		}
 	}
 
+	// Create veth jembatan to namespace for NOC Routing support
+	if err := s.setupVeth(t); err != nil {
+		s.log.Error("Failed to setup veth for namespace", zap.Error(err))
+		return fmt.Errorf("setup veth: %w", err)
+	}
+
 	return nil
 }
 
@@ -115,6 +122,14 @@ func (s *WireGuardService) Teardown(t *tunnel.ResellerTunnel) error {
 
 	confPath := filepath.Join(s.configDir, fmt.Sprintf("%s.conf", ifName))
 	_ = os.Remove(confPath)
+
+	// Clean up veth jembatan
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+	_ = exec.Command("ip", "link", "del", vethHost).Run()
+
+	// Clean up iptables forwarding rules
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-D", "FORWARD", "-i", vethHost, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-D", "FORWARD", "-o", vethHost, "-j", "ACCEPT").Run()
 
 	return nil
 }
@@ -187,5 +202,50 @@ func (s *WireGuardService) AttachPeer(t *tunnel.ResellerTunnel) error {
 	if err := os.WriteFile(confPath, []byte(s.generateConfig(t)), 0600); err != nil {
 		s.log.Warn("Failed to refresh wg config on disk", zap.Error(err))
 	}
+	return nil
+}
+
+func (s *WireGuardService) setupVeth(t *tunnel.ResellerTunnel) error {
+	hostIP, nsIP, _, _ := indexToVethIPs(t.TunnelIndex)
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+	vethNS := fmt.Sprintf("vn-%d", t.TunnelIndex)
+
+	// Clean up old ones first
+	_ = exec.Command("ip", "link", "del", vethHost).Run()
+
+	// 1. Create veth pair
+	if err := exec.Command("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNS).Run(); err != nil {
+		return fmt.Errorf("create veth: %w", err)
+	}
+
+	// 2. Set IP on host end and bring it up
+	if err := exec.Command("ip", "addr", "add", hostIP, "dev", vethHost).Run(); err != nil {
+		return fmt.Errorf("assign host veth ip: %w", err)
+	}
+	if err := exec.Command("ip", "link", "set", vethHost, "up").Run(); err != nil {
+		return fmt.Errorf("bring up host veth: %w", err)
+	}
+
+	// 3. Move peer to namespace
+	if err := exec.Command("ip", "link", "set", vethNS, "netns", t.Namespace).Run(); err != nil {
+		return fmt.Errorf("move peer to namespace: %w", err)
+	}
+
+	// 4. Configure IP inside namespace and bring it up
+	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNS).Run(); err != nil {
+		return fmt.Errorf("assign ns veth ip: %w", err)
+	}
+	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "link", "set", vethNS, "up").Run(); err != nil {
+		return fmt.Errorf("bring up ns veth: %w", err)
+	}
+
+	// 5. Add route to reach the NOC VPN subnet (10.50.0.0/24) via host end of veth
+	hostIPNoMask := stripCIDR(hostIP)
+	_ = exec.Command("ip", "netns", "exec", t.Namespace, "ip", "route", "add", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS).Run()
+
+	// 6. Enable forwarding on the host for this veth subnet
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-i", vethHost, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-o", vethHost, "-j", "ACCEPT").Run()
+
 	return nil
 }

@@ -435,6 +435,8 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 // error so an operator can investigate; we never silently downgrade them to
 // pending because the MikroTik side may still have a working configuration.
 func (s *TunnelService) Reconcile(ctx context.Context) {
+	s.flushStaleTechnicianRules()
+
 	tunnels, err := s.repo.FindActive(ctx)
 	if err != nil {
 		s.log.Error("Reconcile: failed to list active tunnels", zap.Error(err))
@@ -885,4 +887,36 @@ func (s *TunnelService) findVPNIPByEndpointIP(endpointIP string) string {
 		}
 	}
 	return ""
+}
+
+func (s *TunnelService) flushStaleTechnicianRules() {
+	s.log.Info("Cleaning up any stale technician policy routing rules...")
+	out, err := exec.Command("ip", "rule", "show").Output()
+	if err != nil {
+		s.log.Warn("Failed to show ip rules during startup cleanup", zap.Error(err))
+		return
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		// Look for lines containing "lookup 10" (which corresponds to 10XXX table range)
+		if strings.Contains(line, "lookup 10") {
+			// Example output format: "32765:	from 10.50.0.7 lookup 10200"
+			fields := strings.Fields(line)
+			var fromIP string
+			var tableID string
+			for i, field := range fields {
+				if field == "from" && i+1 < len(fields) {
+					fromIP = fields[i+1]
+				}
+				if field == "lookup" && i+1 < len(fields) {
+					tableID = fields[i+1]
+				}
+			}
+			if fromIP != "" && tableID != "" {
+				s.log.Info("Removing stale technician rule", zap.String("from", fromIP), zap.String("table", tableID))
+				_ = exec.Command("ip", "rule", "del", "from", fromIP, "lookup", tableID).Run()
+				_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+			}
+		}
+	}
 }
