@@ -100,6 +100,13 @@ func (s *WireGuardService) Setup(t *tunnel.ResellerTunnel) (err error) {
 		}
 	}
 
+	// Enable masquerade inside the namespace for WireGuard interface
+	// so the reseller's router replies back to the VPS namespace IP
+	_, _ = s.nsSvc.ExecInNS(ns, "iptables", "-t", "nat", "-D", "POSTROUTING", "-o", ifName, "-j", "MASQUERADE")
+	if _, err := s.nsSvc.ExecInNS(ns, "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", ifName, "-j", "MASQUERADE"); err != nil {
+		s.log.Warn("Failed to enable masquerade inside namespace", zap.String("ns", ns), zap.Error(err))
+	}
+
 	// Create veth jembatan to namespace for NOC Routing support
 	if err := s.setupVeth(t); err != nil {
 		s.log.Error("Failed to setup veth for namespace", zap.Error(err))
