@@ -239,3 +239,58 @@ func internalError(c *fiber.Ctx, err error) error {
 		"error":   fiber.Map{"code": "INTERNAL_ERROR", "message": err.Error()},
 	})
 }
+
+func (h *TunnelHandler) SelectNOCReseller(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+
+	var req struct {
+		TechnicianIP string `json:"technician_ip"`
+	}
+	if len(c.Body()) > 0 {
+		_ = c.BodyParser(&req)
+	}
+
+	if req.TechnicianIP == "" {
+		req.TechnicianIP = c.IP()
+	}
+
+	if err := h.svc.SelectNOCReseller(c.Context(), req.TechnicianIP, id); err != nil {
+		return internalError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "NOC routing configured successfully",
+		"mapped_ip": req.TechnicianIP,
+	})
+}
+
+func (h *TunnelHandler) CreateNOCTechnician(c *fiber.Ctx) error {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return badRequest(c, "invalid request body")
+	}
+
+	if req.Name == "" {
+		return badRequest(c, "technician name is required")
+	}
+
+	ip, config, err := h.svc.CreateNOCTechnician(c.Context(), req.Name)
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"name":   req.Name,
+			"ip":     ip,
+			"config": config,
+		},
+	})
+}

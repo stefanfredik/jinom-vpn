@@ -166,6 +166,10 @@ if [ -n "$PEERNAME" ]; then
         # Set as default route
         ip netns exec "$NS_NAME" ip route add default dev "$1"
         
+        # Ensure packets sent to the reseller are masqueraded inside the namespace
+        # so the reseller's MikroTik routes the reply back to the L2TP gateway IP.
+        ip netns exec "$NS_NAME" iptables -t nat -A POSTROUTING -o "$1" -j MASQUERADE
+        
         # Add additional monitored routes
         if [ -f "/etc/ppp/routes.$NS_NAME" ]; then
             while read subnet; do
@@ -269,6 +273,12 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 		return fmt.Errorf("write routes file: %w", err)
 	}
 
+	// 3. Create veth jembatan to namespace
+	if err := s.setupVeth(t); err != nil {
+		s.log.Error("Failed to setup veth for namespace", zap.Error(err))
+		return fmt.Errorf("setup veth: %w", err)
+	}
+
 	return nil
 }
 
@@ -280,14 +290,14 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	_ = s.removeChapSecrets(t.Namespace)
 	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace)))
 
-	// Kill active PPP session for this user
-	_ = exec.Command("pkill", "-f", fmt.Sprintf("pppd.*%s", t.L2TPUsername)).Run()
-
-	// Clean up legacy artifacts (if any)
+	// Clean up veth and forwarding rules
 	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
 	s.cleanupRouting(stripPort(t.RouterIP), nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
 	_ = exec.Command("ip", "link", "del", vethHost).Run()
+
+	// Kill active PPP session for this user
+	_ = exec.Command("pkill", "-f", fmt.Sprintf("pppd.*%s", t.L2TPUsername)).Run()
 
 	return nil
 }
@@ -340,4 +350,49 @@ func (s *L2TPService) removeChapSecrets(ns string) error {
 // IPSecStatusall is kept as a dummy to satisfy any remaining interface signatures.
 func (s *L2TPService) IPSecStatusall(ns string) ([]byte, error) {
 	return []byte("Security Associations (0 up, 0 connecting)"), nil
+}
+
+func (s *L2TPService) setupVeth(t *tunnel.ResellerTunnel) error {
+	hostIP, nsIP, _, _ := indexToVethIPs(t.TunnelIndex)
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+	vethNS := fmt.Sprintf("vn-%d", t.TunnelIndex)
+
+	// Clean up old ones first
+	_ = exec.Command("ip", "link", "del", vethHost).Run()
+
+	// 1. Create veth pair
+	if err := exec.Command("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNS).Run(); err != nil {
+		return fmt.Errorf("create veth: %w", err)
+	}
+
+	// 2. Set IP on host end and bring it up
+	if err := exec.Command("ip", "addr", "add", hostIP, "dev", vethHost).Run(); err != nil {
+		return fmt.Errorf("assign host veth ip: %w", err)
+	}
+	if err := exec.Command("ip", "link", "set", vethHost, "up").Run(); err != nil {
+		return fmt.Errorf("bring up host veth: %w", err)
+	}
+
+	// 3. Move peer to namespace
+	if err := exec.Command("ip", "link", "set", vethNS, "netns", t.Namespace).Run(); err != nil {
+		return fmt.Errorf("move peer to namespace: %w", err)
+	}
+
+	// 4. Configure IP inside namespace and bring it up
+	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNS).Run(); err != nil {
+		return fmt.Errorf("assign ns veth ip: %w", err)
+	}
+	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "link", "set", vethNS, "up").Run(); err != nil {
+		return fmt.Errorf("bring up ns veth: %w", err)
+	}
+
+	// 5. Add route to reach the NOC VPN subnet (10.50.0.0/24) via host end of veth
+	hostIPNoMask := stripCIDR(hostIP)
+	_ = exec.Command("ip", "netns", "exec", t.Namespace, "ip", "route", "add", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS).Run()
+
+	// 6. Enable forwarding on the host for this veth subnet
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-i", vethHost, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-o", vethHost, "-j", "ACCEPT").Run()
+
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -665,4 +666,151 @@ func generatePassword(length int) string {
 		b[i] = charset[rand.IntN(len(charset))]
 	}
 	return string(b)
+}
+
+func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP string, id uuid.UUID) error {
+	t, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("get tunnel: %w", err)
+	}
+
+	parts := strings.Split(technicianIP, ".")
+	if len(parts) != 4 {
+		return fmt.Errorf("invalid technician IP format: %s", technicianIP)
+	}
+	lastOctet, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return fmt.Errorf("invalid technician IP octet: %w", err)
+	}
+	tableID := fmt.Sprintf("%d", 10000+lastOctet)
+
+	// Clean up any existing rules for this technician IP
+	_ = exec.Command("ip", "rule", "del", "from", technicianIP, "lookup", tableID).Run()
+
+	// Add the ip rule: all packets from technicianIP lookup tableID
+	if err := exec.Command("ip", "rule", "add", "from", technicianIP, "lookup", tableID).Run(); err != nil {
+		return fmt.Errorf("failed to add ip rule: %w", err)
+	}
+
+	// Flush and populate the routing table
+	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+
+	a := t.TunnelIndex / 64
+	b := (t.TunnelIndex % 64) * 4
+	nsIPNoMask := fmt.Sprintf("10.254.%d.%d", a, b+2)
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+
+	// Route private subnet ranges to the namespace veth IP
+	privateRanges := []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"}
+	for _, subnet := range privateRanges {
+		if err := exec.Command("ip", "route", "add", subnet, "via", nsIPNoMask, "dev", vethHost, "table", tableID).Run(); err != nil {
+			s.log.Warn("Failed to add route to technician table", zap.String("subnet", subnet), zap.Error(err))
+		}
+	}
+
+	s.log.Info("Technician selected reseller tunnel",
+		zap.String("technician_ip", technicianIP),
+		zap.String("tunnel", t.Name),
+		zap.String("veth_host", vethHost),
+		zap.String("ns_ip", nsIPNoMask),
+	)
+	return nil
+}
+
+func (s *TunnelService) CreateNOCTechnician(ctx context.Context, name string) (ip string, config string, err error) {
+	if name == "" {
+		return "", "", fmt.Errorf("technician name cannot be empty")
+	}
+
+	// 1. Generate client keys using native wg commands
+	privBytes, err := exec.Command("wg", "genkey").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("generate private key: %w", err)
+	}
+	clientPriv := strings.TrimSpace(string(privBytes))
+
+	pubBytes, err := exec.Command("sh", "-c", fmt.Sprintf("echo %s | wg pubkey", clientPriv)).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("generate public key: %w", err)
+	}
+	clientPub := strings.TrimSpace(string(pubBytes))
+
+	// 2. Fetch server public key
+	serverPubBytes, err := exec.Command("wg", "show", "wg-noc", "public-key").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("fetch server public key: %w", err)
+	}
+	serverPub := strings.TrimSpace(string(serverPubBytes))
+
+	// 3. Find next available IP
+	clientIP, _, err := getNextFreeIP()
+	if err != nil {
+		return "", "", err
+	}
+
+	// 4. Append to server config file
+	f, err := os.OpenFile("/etc/wireguard/wg-noc.conf", os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", "", fmt.Errorf("open wg-noc.conf: %w", err)
+	}
+	defer f.Close()
+
+	peerEntry := fmt.Sprintf("\n[Peer]\n# %s\nPublicKey = %s\nAllowedIPs = %s/32\n", name, clientPub, clientIP)
+	if _, err := f.WriteString(peerEntry); err != nil {
+		return "", "", fmt.Errorf("write peer entry: %w", err)
+	}
+
+	// 5. Apply peer to running WireGuard interface dynamically
+	if err := exec.Command("wg", "set", "wg-noc", "peer", clientPub, "allowed-ips", clientIP+"/32").Run(); err != nil {
+		return "", "", fmt.Errorf("apply wireguard peer: %w", err)
+	}
+
+	// 6. Generate client config file content
+	clientConfig := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s/24
+DNS = 8.8.8.8
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 10.50.0.0/24, 10.250.0.0/16, 10.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8
+Endpoint = %s:51820
+PersistentKeepalive = 25
+`, clientPriv, clientIP, serverPub, s.vpsPublicIP)
+
+	return clientIP, clientConfig, nil
+}
+
+func getNextFreeIP() (string, int, error) {
+	data, err := os.ReadFile("/etc/wireguard/wg-noc.conf")
+	if err != nil {
+		return "", 0, fmt.Errorf("read wg-noc.conf: %w", err)
+	}
+
+	used := make(map[int]bool)
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "AllowedIPs") {
+			parts := strings.Split(line, "=")
+			if len(parts) == 2 {
+				ipVal := strings.TrimSpace(parts[1])
+				ipVal = strings.Split(ipVal, "/")[0] // Strip mask
+				ipParts := strings.Split(ipVal, ".")
+				if len(ipParts) == 4 && ipParts[0] == "10" && ipParts[1] == "50" && ipParts[2] == "0" {
+					octet, err := strconv.Atoi(ipParts[3])
+					if err == nil {
+						used[octet] = true
+					}
+				}
+			}
+		}
+	}
+
+	for i := 2; i <= 254; i++ {
+		if !used[i] {
+			return fmt.Sprintf("10.50.0.%d", i), i, nil
+		}
+	}
+	return "", 0, fmt.Errorf("no free IP addresses left in 10.50.0.0/24 range")
 }

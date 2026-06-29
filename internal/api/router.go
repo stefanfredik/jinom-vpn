@@ -16,7 +16,11 @@ type RouterDeps struct {
 func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	app.Get("/health", deps.HealthHandler.Health)
 
+	// Serve Static Dashboard
+	app.Static("/", "./web")
+
 	api := app.Group("/api/v1", middleware.APIKeyAuth(deps.APIKey))
+	api.Post("/noc/users", deps.TunnelHandler.CreateNOCTechnician)
 
 	tunnels := api.Group("/tunnels")
 	tunnels.Get("/", deps.TunnelHandler.List)
@@ -28,5 +32,6 @@ func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	tunnels.Post("/:id/provision", deps.TunnelHandler.Provision)
 	tunnels.Post("/:id/activate", deps.TunnelHandler.Activate)
 	tunnels.Post("/:id/deactivate", deps.TunnelHandler.Deactivate)
+	tunnels.Post("/:id/noc/select", deps.TunnelHandler.SelectNOCReseller)
 	tunnels.Delete("/:id", deps.TunnelHandler.Delete)
 }
