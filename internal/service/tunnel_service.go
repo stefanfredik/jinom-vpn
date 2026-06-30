@@ -992,12 +992,12 @@ func (s *TunnelService) ListNOCTechnicians(ctx context.Context) ([]NOCUser, erro
 			if strings.HasPrefix(line, "#") {
 				current.Name = strings.TrimSpace(strings.TrimPrefix(line, "#"))
 			} else if strings.HasPrefix(line, "PublicKey") {
-				parts := strings.Split(line, "=")
+				parts := strings.SplitN(line, "=", 2)
 				if len(parts) == 2 {
 					current.PublicKey = strings.TrimSpace(parts[1])
 				}
 			} else if strings.HasPrefix(line, "AllowedIPs") {
-				parts := strings.Split(line, "=")
+				parts := strings.SplitN(line, "=", 2)
 				if len(parts) == 2 {
 					ipVal := strings.TrimSpace(parts[1])
 					current.IP = strings.Split(ipVal, "/")[0]
