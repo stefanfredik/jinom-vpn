@@ -920,3 +920,165 @@ func (s *TunnelService) flushStaleTechnicianRules() {
 		}
 	}
 }
+
+type NOCUser struct {
+	Name            string `json:"name"`
+	PublicKey       string `json:"public_key"`
+	IP              string `json:"ip"`
+	LatestHandshake int64  `json:"latest_handshake"`
+	TransferRx      int64  `json:"transfer_rx"`
+	TransferTx      int64  `json:"transfer_tx"`
+	Status          string `json:"status"`
+}
+
+func (s *TunnelService) ListNOCTechnicians(ctx context.Context) ([]NOCUser, error) {
+	data, err := os.ReadFile("/etc/wireguard/wg-noc.conf")
+	if err != nil {
+		return nil, fmt.Errorf("read wg-noc.conf: %w", err)
+	}
+
+	activePeers := make(map[string]NOCUser)
+	if out, err := exec.Command("wg", "show", "wg-noc", "dump").Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) >= 8 {
+				pubKey := fields[0]
+				handshake, _ := strconv.ParseInt(fields[4], 10, 64)
+				tx, _ := strconv.ParseInt(fields[5], 10, 64)
+				rx, _ := strconv.ParseInt(fields[6], 10, 64)
+				
+				status := "offline"
+				if handshake > 0 && time.Now().Unix()-handshake < 180 {
+					status = "online"
+				}
+
+				activePeers[pubKey] = NOCUser{
+					PublicKey:       pubKey,
+					LatestHandshake: handshake,
+					TransferTx:      tx,
+					TransferRx:      rx,
+					Status:          status,
+				}
+			}
+		}
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var users []NOCUser
+	var current NOCUser
+	inPeer := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "[Peer]" {
+			if inPeer && current.PublicKey != "" {
+				if active, ok := activePeers[current.PublicKey]; ok {
+					current.LatestHandshake = active.LatestHandshake
+					current.TransferTx = active.TransferTx
+					current.TransferRx = active.TransferRx
+					current.Status = active.Status
+				} else {
+					current.Status = "offline"
+				}
+				users = append(users, current)
+			}
+			current = NOCUser{}
+			inPeer = true
+			continue
+		}
+
+		if inPeer {
+			if strings.HasPrefix(line, "#") {
+				current.Name = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			} else if strings.HasPrefix(line, "PublicKey") {
+				parts := strings.Split(line, "=")
+				if len(parts) == 2 {
+					current.PublicKey = strings.TrimSpace(parts[1])
+				}
+			} else if strings.HasPrefix(line, "AllowedIPs") {
+				parts := strings.Split(line, "=")
+				if len(parts) == 2 {
+					ipVal := strings.TrimSpace(parts[1])
+					current.IP = strings.Split(ipVal, "/")[0]
+				}
+			}
+		}
+	}
+
+	if inPeer && current.PublicKey != "" {
+		if active, ok := activePeers[current.PublicKey]; ok {
+			current.LatestHandshake = active.LatestHandshake
+			current.TransferTx = active.TransferTx
+			current.TransferRx = active.TransferRx
+			current.Status = active.Status
+		} else {
+			current.Status = "offline"
+		}
+		users = append(users, current)
+	}
+
+	return users, nil
+}
+
+func (s *TunnelService) DeleteNOCTechnician(ctx context.Context, publicKey string) error {
+	if publicKey == "" {
+		return fmt.Errorf("public key cannot be empty")
+	}
+
+	data, err := os.ReadFile("/etc/wireguard/wg-noc.conf")
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var newLines []string
+	var peerLines []string
+	inPeer := false
+	isTargetPeer := false
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "[Peer]" {
+			if inPeer {
+				if !isTargetPeer {
+					newLines = append(newLines, peerLines...)
+				}
+				peerLines = nil
+			}
+			inPeer = true
+			isTargetPeer = false
+			peerLines = append(peerLines, line)
+			continue
+		}
+
+		if inPeer {
+			peerLines = append(peerLines, line)
+			if strings.Contains(trimmed, publicKey) {
+				isTargetPeer = true
+			}
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+
+	if inPeer {
+		if !isTargetPeer {
+			newLines = append(newLines, peerLines...)
+		}
+	}
+
+	output := strings.Join(newLines, "\n")
+	for strings.Contains(output, "\n\n\n") {
+		output = strings.ReplaceAll(output, "\n\n\n", "\n\n")
+	}
+	if err := os.WriteFile("/etc/wireguard/wg-noc.conf", []byte(output), 0600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	_ = exec.Command("wg", "set", "wg-noc", "peer", publicKey, "remove").Run()
+	s.log.Info("Deleted NOC technician WireGuard peer", zap.String("public_key", publicKey))
+	return nil
+}
