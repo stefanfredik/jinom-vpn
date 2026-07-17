@@ -1,6 +1,7 @@
 package mikrotik
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -88,7 +89,10 @@ func (c *Client) RunCommand(cmd Command) error {
 		args = append(args, fmt.Sprintf("=%s=%s", k, v))
 	}
 
-	_, err := c.conn.RunArgs(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := c.conn.RunArgsContext(ctx, args)
 	if err != nil {
 		return fmt.Errorf("run %s: %w", cmd.Path, err)
 	}
@@ -106,7 +110,10 @@ func (c *Client) Run(path string, params map[string]string) ([]map[string]string
 		}
 	}
 
-	reply, err := c.conn.RunArgs(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	reply, err := c.conn.RunArgsContext(ctx, args)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", path, err)
 	}
