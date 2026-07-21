@@ -62,19 +62,41 @@ func NewClient(address string, apiPort int, username, password string, isV7 bool
 	return NewClientWithTimeout(address, apiPort, username, password, isV7, defaultDialTimeout)
 }
 
-// NewClientWithTimeout sama dengan NewClient tetapi caller menentukan timeout
-// dial+login secara eksplisit. Dipakai oleh test dan oleh path khusus yang
-// punya konteks deadline berbeda (cleanup synchronous vs. provisioning).
 func NewClientWithTimeout(address string, apiPort int, username, password string, isV7 bool, timeout time.Duration) (*Client, error) {
 	if apiPort <= 0 || apiPort > 65535 {
 		apiPort = 8728
 	}
 	addr := resolveAPIAddress(address, apiPort)
-	conn, err := routeros.DialTimeout(addr, username, password, timeout)
+
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("dial routeros %s: %w", addr, err)
+		return nil, fmt.Errorf("dial tcp %s: %w", addr, err)
 	}
-	return &Client{conn: conn, isV7: isV7}, nil
+
+	// Enforce the timeout for the entire login handshake phase
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set conn deadline: %w", err)
+	}
+
+	client, err := routeros.NewClient(conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("init routeros client: %w", err)
+	}
+
+	if err := client.Login(username, password); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("login routeros: %w", err)
+	}
+
+	// Reset the connection deadline so context-based command timeouts work correctly
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("reset conn deadline: %w", err)
+	}
+
+	return &Client{conn: client, isV7: isV7}, nil
 }
 
 func (c *Client) Close() {
