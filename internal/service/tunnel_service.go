@@ -82,6 +82,9 @@ func (s *TunnelService) Create(ctx context.Context, req CreateTunnelRequest) (*t
 	if req.RouterAPIPort != nil {
 		t.RouterAPIPort = *req.RouterAPIPort
 	}
+	// reseller_tunnels.router_api_port is NOT NULL with a BETWEEN 1 AND 65535
+	// check, so an omitted (0) port has to fall back to the RouterOS default.
+	t.RouterAPIPort = t.EffectiveAPIPort()
 
 	if err := t.Validate(); err != nil {
 		return nil, err
