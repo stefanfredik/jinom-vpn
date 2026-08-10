@@ -122,6 +122,34 @@ func (h *TunnelHandler) GetStatus(c *fiber.Ctx) error {
 	})
 }
 
+func (h *TunnelHandler) GetScript(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+
+	// Assuming the VPS public IP is passed via an environment variable or configuration.
+	// We'll use the same VPS IP logic that Provision uses.
+	// Since TunnelHandler doesn't have direct access to vpsPublicIP, we need it.
+	// Ah wait, s.vpsPublicIP is inside TunnelService. TunnelService.GenerateRouterOSScript
+	// should just get the vpsPublicIP from its own field!
+	// Oh, I passed vpsPublicIP as an argument to GenerateRouterOSScript. Let me check if TunnelService has a getter or if I can just remove the argument. Let me check that. 
+	// For now, I'll pass an empty string and we will see if we need to modify GenerateRouterOSScript. No, let's fix GenerateRouterOSScript to not need it!
+	
+	// Generate the script using the service which has access to vpsPublicIP internally
+	script, err := h.svc.GenerateRouterOSScript(c.Context(), id)
+	if err != nil {
+		return handleTunnelError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"script": script,
+		},
+	})
+}
+
 func (h *TunnelHandler) Provision(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {

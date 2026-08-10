@@ -28,6 +28,7 @@ func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	tunnels.Get("/", deps.TunnelHandler.List)
 	tunnels.Post("/", deps.TunnelHandler.Create)
 	tunnels.Get("/:id", deps.TunnelHandler.Get)
+	tunnels.Get("/:id/script", deps.TunnelHandler.GetScript)
 	tunnels.Get("/:id/status", deps.TunnelHandler.GetStatus)
 	tunnels.Get("/:id/metrics", deps.TunnelHandler.GetMetrics)
 	tunnels.Get("/:id/history", deps.TunnelHandler.GetHistory)

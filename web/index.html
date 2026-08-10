@@ -674,6 +674,29 @@
         </div>
     </div>
 
+    <!-- Modal Winbox Script -->
+    <div class="modal-overlay" id="winbox-script-modal">
+        <div class="modal" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 class="modal-title">RouterOS Manual Setup Script</h3>
+                <button class="btn-close" id="close-winbox-script">&times;</button>
+            </div>
+            
+            <div style="display: flex; flex-direction: column; gap: 1rem;">
+                <div class="form-group">
+                    <label class="form-label" style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>Paste script berikut ke New Terminal (Winbox/WebFig)</span>
+                        <div class="loading-spinner" id="winbox-script-loading" style="display: none;"></div>
+                    </label>
+                    <textarea class="form-input" id="winbox-script-textarea" readonly style="font-family: monospace; font-size: 0.8rem; height: 300px; resize: none;" placeholder="Loading script..."></textarea>
+                </div>
+                <div style="display: flex; justify-content: flex-end;">
+                    <button class="btn-primary" id="copy-winbox-script" style="width: 100%;">Copy Script</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div class="toast" id="toast">Notifikasi</div>
 
@@ -696,6 +719,13 @@
         const saveSettingsBtn = document.getElementById("save-settings");
         const apiKeyInput = document.getElementById("api-key-input");
         const toast = document.getElementById("toast");
+
+        // Winbox Script Elements
+        const winboxScriptModal = document.getElementById("winbox-script-modal");
+        const closeWinboxScriptBtn = document.getElementById("close-winbox-script");
+        const winboxScriptTextarea = document.getElementById("winbox-script-textarea");
+        const copyWinboxScriptBtn = document.getElementById("copy-winbox-script");
+        const winboxScriptLoading = document.getElementById("winbox-script-loading");
 
         // VPN Setup Elements
         const vpnSetupModal = document.getElementById("vpn-setup-modal");
@@ -803,6 +833,22 @@
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
                 showToast("Berkas .conf diunduh!", "success");
+            });
+
+            // Winbox Script Modal Events
+            closeWinboxScriptBtn.addEventListener("click", () => {
+                winboxScriptModal.classList.remove("active");
+            });
+
+            copyWinboxScriptBtn.addEventListener("click", () => {
+                const scriptText = winboxScriptTextarea.value;
+                if (!scriptText) return;
+                
+                navigator.clipboard.writeText(scriptText).then(() => {
+                    showToast("Script berhasil disalin!", "success");
+                }).catch(() => {
+                    showToast("Gagal menyalin script.", "error");
+                });
             });
 
             clearRoutingBtn.addEventListener("click", () => {
@@ -969,9 +1015,13 @@
                             <div class="link-tools">
                                 <a href="http://192.168.1.1" target="_blank" class="btn-tool" ${isRouted ? '' : 'style="opacity: 0.5; pointer-events: none;"'}>Open ONT (1.1)</a>
                                 <button class="btn-tool" onclick="copyWinboxCommand('${t.tunnel_index}', '${t.client_ip_address}')">Winbox Link</button>
+                                <button class="btn-tool" onclick="showWinboxScriptModal('${t.id}')" style="background: rgba(255, 255, 255, 0.1);">Script Config</button>
                             </div>
                         ` : `
                             <button class="btn-primary" style="opacity: 0.5; cursor: not-allowed;" disabled>WireGuard (Bypass Auth)</button>
+                            <div class="link-tools" style="justify-content: center; margin-top: 0.5rem;">
+                                <button class="btn-tool" onclick="showWinboxScriptModal('${t.id}')" style="background: rgba(255, 255, 255, 0.1);">Script Config</button>
+                            </div>
                         `}
                     </div>
                 `;
@@ -1036,6 +1086,39 @@
                 showToast(`Salin alamat Winbox: ${cmd}`, "success");
             }).catch(() => {
                 showToast(`Gagal menyalin alamat Winbox.`, "error");
+            });
+        }
+
+        function showWinboxScriptModal(tunnelId) {
+            winboxScriptModal.classList.add("active");
+            winboxScriptTextarea.value = "";
+            winboxScriptLoading.style.display = "block";
+            copyWinboxScriptBtn.disabled = true;
+            copyWinboxScriptBtn.style.opacity = "0.5";
+
+            fetch(`/api/v1/tunnels/${tunnelId}/script`, {
+                method: 'GET',
+                headers: getHeaders()
+            })
+            .then(async res => {
+                const json = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    const errMsg = json.error && json.error.message ? json.error.message : "Gagal memuat script.";
+                    throw new Error(errMsg);
+                }
+                return json;
+            })
+            .then(json => {
+                const scriptText = json.data && json.data.script ? json.data.script : "";
+                winboxScriptTextarea.value = scriptText;
+                copyWinboxScriptBtn.disabled = false;
+                copyWinboxScriptBtn.style.opacity = "1";
+            })
+            .catch(err => {
+                winboxScriptTextarea.value = "Error: " + err.message;
+            })
+            .finally(() => {
+                winboxScriptLoading.style.display = "none";
             });
         }
     </script>
