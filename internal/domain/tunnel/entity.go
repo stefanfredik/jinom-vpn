@@ -32,6 +32,12 @@ var (
 	ErrInvalidVPNType = errors.New("vpn_type must be 'wireguard' or 'l2tp'")
 	ErrAlreadyActive  = errors.New("tunnel is already active")
 	ErrNotActive      = errors.New("tunnel is not active")
+	// ErrConflict ditandai repository saat optimistic-lock gagal: baris sudah
+	// berubah sejak pemanggil membacanya. Caller memetakannya ke HTTP 409.
+	ErrConflict = errors.New("tunnel was modified by someone else")
+	// ErrInvalidSubnet membungkus semua penolakan validasi monitoring subnet.
+	// Pesan detailnya menyusul lewat %w agar operator tahu CIDR mana yang salah.
+	ErrInvalidSubnet = errors.New("invalid monitoring subnet")
 )
 
 type ResellerTunnel struct {

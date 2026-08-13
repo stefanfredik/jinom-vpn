@@ -49,3 +49,20 @@ func TestHealthMonitor_PurgeStale(t *testing.T) {
 		t.Errorf("dropped ID %s remained after purge", dropID)
 	}
 }
+
+func TestHealthMonitor_WorkerCountConfiguration(t *testing.T) {
+	s := NewHealthMonitorService(nil, nil, nil, nil, "", zap.NewNop())
+	if s.workerCount != 20 {
+		t.Errorf("default workerCount = %d, want 20", s.workerCount)
+	}
+
+	s.SetWorkerCount(50)
+	if s.workerCount != 50 {
+		t.Errorf("after SetWorkerCount(50), workerCount = %d, want 50", s.workerCount)
+	}
+
+	s.SetWorkerCount(-10) // Invalid count ignored
+	if s.workerCount != 50 {
+		t.Errorf("invalid SetWorkerCount should be ignored, got %d, want 50", s.workerCount)
+	}
+}

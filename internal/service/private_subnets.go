@@ -10,11 +10,25 @@ var defaultPrivateSubnets = []string{
 	"192.168.0.0/16",
 }
 
-// effectiveSubnets returns the tunnel's MonitoringSubnets if set, otherwise
-// falls back to all RFC-1918 private ranges.
+// effectiveSubnets mengembalikan default private subnets RFC-1918 yang digabung
+// dengan subnet kustom/IP publik yang dimasukkan operator.
+// Dengan demikian, IP private selalu aktif secara otomatis dan operator hanya perlu
+// memasukkan IP publik/subnet tambahan tanpa menginput ulang RFC-1918.
 func effectiveSubnets(monitoringSubnets []string) []string {
-	if len(monitoringSubnets) > 0 {
-		return monitoringSubnets
+	result := make([]string, 0, len(defaultPrivateSubnets)+len(monitoringSubnets))
+	seen := make(map[string]bool)
+
+	for _, s := range defaultPrivateSubnets {
+		result = append(result, s)
+		seen[s] = true
 	}
-	return defaultPrivateSubnets
+
+	for _, s := range monitoringSubnets {
+		if !seen[s] {
+			result = append(result, s)
+			seen[s] = true
+		}
+	}
+
+	return result
 }

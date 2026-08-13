@@ -26,19 +26,20 @@ type tunnelHealthState struct {
 }
 
 type HealthMonitorService struct {
-	repo       tunnel.Repository
-	nsSvc      *NamespaceService
-	wgSvc      *WireGuardService
-	l2tpSvc    *L2TPService
-	vpsPublicIP string
-	interval   time.Duration
+	repo          tunnel.Repository
+	nsSvc         *NamespaceService
+	wgSvc         *WireGuardService
+	l2tpSvc       *L2TPService
+	vpsPublicIP   string
+	interval      time.Duration
 	failThreshold int
 	maxRecoveries int
-	log        *zap.Logger
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	states     map[string]*tunnelHealthState
-	mu         sync.Mutex
+	workerCount   int
+	log           *zap.Logger
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	states        map[string]*tunnelHealthState
+	mu            sync.Mutex
 	// recoverFn performs a locked teardown+setup of a tunnel. Injected by
 	// SetRecoverHook (wired to TunnelService.RecoverTunnel) so recovery runs
 	// under the same setupMu as operator actions, avoiding races. Optional —
@@ -50,6 +51,13 @@ type HealthMonitorService struct {
 // Wired in main.go to TunnelService.RecoverTunnel so recovery holds setupMu.
 func (s *HealthMonitorService) SetRecoverHook(fn func(t *tunnel.ResellerTunnel) error) {
 	s.recoverFn = fn
+}
+
+// SetWorkerCount configures the maximum concurrent worker goroutines for health checks.
+func (s *HealthMonitorService) SetWorkerCount(count int) {
+	if count > 0 {
+		s.workerCount = count
+	}
 }
 
 func NewHealthMonitorService(
@@ -69,6 +77,7 @@ func NewHealthMonitorService(
 		interval:      60 * time.Second,
 		failThreshold: 5,
 		maxRecoveries: 3,
+		workerCount:   20,
 		log:           log,
 		states:        make(map[string]*tunnelHealthState),
 	}
@@ -85,6 +94,7 @@ func (s *HealthMonitorService) Start() {
 			zap.Duration("interval", s.interval),
 			zap.Int("fail_threshold", s.failThreshold),
 			zap.Int("max_recoveries", s.maxRecoveries),
+			zap.Int("worker_count", s.workerCount),
 		)
 
 		ticker := time.NewTicker(s.interval)
@@ -139,10 +149,46 @@ func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 		return
 	}
 
-	for i := range tunnels {
-		t := &tunnels[i]
-		s.checkTunnel(ctx, t)
+	if len(tunnels) == 0 {
+		return
 	}
+
+	// Dynamic worker pool for parallel tunnel health checks
+	workerCount := s.workerCount
+	if workerCount <= 0 {
+		workerCount = 20
+	}
+	if workerCount > len(tunnels) {
+		workerCount = len(tunnels)
+	}
+
+	jobs := make(chan *tunnel.ResellerTunnel, len(tunnels))
+	var wg sync.WaitGroup
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t, ok := <-jobs:
+					if !ok {
+						return
+					}
+					s.checkTunnel(ctx, t)
+				}
+			}
+		}()
+	}
+
+	for i := range tunnels {
+		jobs <- &tunnels[i]
+	}
+	close(jobs)
+
+	wg.Wait()
 
 	// Lazy purge: pasangan-pengaman untuk Forget() — kalau ada path delete
 	// yang lupa memanggil Forget, ID yang sudah tidak muncul di FindActive

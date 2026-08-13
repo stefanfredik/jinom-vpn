@@ -45,15 +45,17 @@ type TunnelResponse struct {
 }
 
 type TunnelStatusResponse struct {
-	ID             uuid.UUID `json:"id"`
-	Status         string    `json:"status"`
-	Namespace      string    `json:"namespace"`
-	LastError      string    `json:"last_error,omitempty"`
-	PeerReachable  bool      `json:"peer_reachable"`
-	MikrotikStatus string    `json:"mikrotik_status,omitempty"`
-	MikrotikIP     string    `json:"mikrotik_ip,omitempty"`
-	MikrotikUptime string    `json:"mikrotik_uptime,omitempty"`
-	Uptime         string    `json:"uptime,omitempty"`
+	ID                uuid.UUID `json:"id"`
+	Status            string    `json:"status"`
+	Namespace         string    `json:"namespace"`
+	LastError         string    `json:"last_error,omitempty"`
+	PeerReachable     bool      `json:"peer_reachable"`
+	MikrotikStatus    string    `json:"mikrotik_status,omitempty"`
+	MikrotikIP        string    `json:"mikrotik_ip,omitempty"`
+	MikrotikUptime    string    `json:"mikrotik_uptime,omitempty"`
+	Uptime            string    `json:"uptime,omitempty"`
+	ConfiguredSubnets []string  `json:"configured_subnets"`
+	ActiveSubnets     []string  `json:"active_subnets"`
 }
 
 type ListResponse struct {

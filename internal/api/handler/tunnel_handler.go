@@ -78,6 +78,33 @@ func (h *TunnelHandler) Create(c *fiber.Ctx) error {
 	})
 }
 
+// UpdateSubnets menangani PATCH /tunnels/:id/subnets.
+//
+// Path-nya spesifik (bukan PATCH /tunnels/:id) supaya kontraknya jujur: hanya
+// monitoring subnet yang dapat diubah setelah tunnel dibuat, dan tidak ada
+// celah untuk menyelundupkan field lain lewat body.
+func (h *TunnelHandler) UpdateSubnets(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+
+	var req service.UpdateSubnetsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badRequest(c, "invalid request body")
+	}
+
+	t, err := h.svc.UpdateSubnets(c.Context(), id, req)
+	if err != nil {
+		return handleTunnelError(c, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    dto.ToTunnelResponse(t),
+	})
+}
+
 func (h *TunnelHandler) Get(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -109,15 +136,17 @@ func (h *TunnelHandler) GetStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": dto.TunnelStatusResponse{
-			ID:             status.ID,
-			Status:         string(status.Status),
-			Namespace:      status.Namespace,
-			LastError:      status.LastError,
-			PeerReachable:  status.PeerReachable,
-			MikrotikStatus: status.MikrotikStatus,
-			MikrotikIP:     status.MikrotikIP,
-			MikrotikUptime: status.MikrotikUptime,
-			Uptime:         status.Uptime,
+			ID:                status.ID,
+			Status:            string(status.Status),
+			Namespace:         status.Namespace,
+			LastError:         status.LastError,
+			PeerReachable:     status.PeerReachable,
+			MikrotikStatus:    status.MikrotikStatus,
+			MikrotikIP:        status.MikrotikIP,
+			MikrotikUptime:    status.MikrotikUptime,
+			Uptime:            status.Uptime,
+			ConfiguredSubnets: status.ConfiguredSubnets,
+			ActiveSubnets:     status.ActiveSubnets,
 		},
 	})
 }
@@ -249,6 +278,21 @@ func handleTunnelError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"error":   fiber.Map{"code": "NOT_FOUND", "message": "tunnel not found"},
+		})
+	}
+	// Subnet tidak valid adalah kesalahan input operator, bukan kegagalan
+	// server: pesan aslinya diteruskan karena menyebut CIDR mana yang ditolak
+	// dan alasannya.
+	if errors.Is(err, tunnel.ErrInvalidSubnet) {
+		return badRequest(c, err.Error())
+	}
+	if errors.Is(err, tunnel.ErrConflict) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error": fiber.Map{
+				"code":    "CONFLICT",
+				"message": "Tunnel sudah diubah oleh orang lain. Muat ulang halaman lalu coba lagi.",
+			},
 		})
 	}
 	return internalError(c, err)

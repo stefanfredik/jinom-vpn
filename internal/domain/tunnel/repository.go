@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +19,10 @@ type Repository interface {
 	FindActiveOrDown(ctx context.Context) ([]ResellerTunnel, error)
 	NextTunnelIndex(ctx context.Context) (int, error)
 	Save(ctx context.Context, t *ResellerTunnel) error
+	// UpdateSubnets mengganti monitoring_subnets dengan optimistic locking:
+	// penulisan ditolak (ErrConflict) bila updated_at di DB sudah bergeser dari
+	// expectedUpdatedAt. Mengembalikan updated_at yang baru.
+	UpdateSubnets(ctx context.Context, id uuid.UUID, subnets []string, expectedUpdatedAt time.Time) (time.Time, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status Status, lastError string) error
 	SaveMetric(ctx context.Context, metric *TunnelMetric) error
 	GetMetrics(ctx context.Context, tunnelID uuid.UUID, limit int) ([]TunnelMetric, error)

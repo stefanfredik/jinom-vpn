@@ -212,6 +212,78 @@ func (s *WireGuardService) AttachPeer(t *tunnel.ResellerTunnel) error {
 	return nil
 }
 
+// ReloadRoutes menerapkan perubahan monitoring subnet ke interface yang SEDANG
+// BERJALAN, tanpa teardown.
+//
+// Sengaja tidak memakai teardown+setup: itu mereset handshake WireGuard, dan
+// health monitor menilai kesehatan tunnel dari umur handshake
+// (wgHandshakeStaleAfter). Tunnel yang baru di-restart akan tampak "tanpa
+// handshake" dan bisa dinilai gagal, yang lalu memakan jatah recoveryCount.
+// Reload selektif menghindari keduanya: nol downtime, handshake utuh.
+//
+// t harus SUDAH memuat daftar subnet yang baru; oldSubnets adalah nilai
+// sebelum perubahan (bentuk mentah, sebelum fallback RFC-1918).
+//
+// Pemanggil wajib memegang setupMu.
+func (s *WireGuardService) ReloadRoutes(t *tunnel.ResellerTunnel, oldSubnets []string) error {
+	ns := t.Namespace
+	ifName := fmt.Sprintf("wg-%s", ns)
+
+	// Diff dihitung atas daftar EFEKTIF, bukan mentah: daftar kosong berarti
+	// RFC-1918 terpasang sebagai route nyata. Membandingkan bentuk mentah
+	// membuat perubahan []->["10.0.0.0/8"] terlihat sebagai "tambah 10/8"
+	// padahal 10/8 sudah terpasang, dan 172.16/12 + 192.168/16 yang seharusnya
+	// dicabut malah tertinggal sebagai route yatim.
+	added, removed := tunnel.DiffSubnets(
+		effectiveSubnets(oldSubnets),
+		effectiveSubnets(t.MonitoringSubnets),
+	)
+
+	if len(added) == 0 && len(removed) == 0 {
+		s.log.Debug("ReloadRoutes: no effective route change",
+			zap.String("namespace", ns))
+	}
+
+	for _, subnet := range removed {
+		if _, err := s.nsSvc.ExecInNS(ns, "ip", "route", "del", subnet, "dev", ifName); err != nil {
+			// Route yang memang sudah tidak ada bukan kegagalan — bisa saja
+			// hilang karena recovery sebelumnya. Yang penting state akhirnya.
+			s.log.Warn("ReloadRoutes: remove route failed (continuing)",
+				zap.String("subnet", subnet), zap.Error(err))
+		}
+	}
+
+	// Berbeda dengan penghapusan, kegagalan memasang route DI-ESKALASI jadi
+	// error: subnet yang gagal dipasang berarti device di dalamnya tidak akan
+	// terjangkau, sementara UI melaporkan tunnel sehat. Caller me-rollback DB.
+	for _, subnet := range added {
+		if _, err := s.nsSvc.ExecInNS(ns, "ip", "route", "add", subnet, "dev", ifName); err != nil {
+			return fmt.Errorf("add route %s: %w", subnet, err)
+		}
+	}
+
+	// AllowedIPs adalah filter kripto WireGuard, terpisah dari tabel route
+	// kernel: paket ke subnet baru akan di-drop peer meski route-nya ada.
+	// Dilewati kalau peer belum ter-provision — Setup/AttachPeer nanti yang
+	// memasangnya dari MonitoringSubnets yang sudah tersimpan.
+	if t.ClientPublicKey == "" {
+		s.log.Info("ReloadRoutes: peer not provisioned yet, skipping AllowedIPs refresh",
+			zap.String("namespace", ns))
+		return nil
+	}
+
+	if err := s.AttachPeer(t); err != nil {
+		return fmt.Errorf("refresh allowed-ips: %w", err)
+	}
+
+	s.log.Info("ReloadRoutes: applied",
+		zap.String("namespace", ns),
+		zap.Strings("added", added),
+		zap.Strings("removed", removed),
+	)
+	return nil
+}
+
 func (s *WireGuardService) setupVeth(t *tunnel.ResellerTunnel) error {
 	hostIP, nsIP, _, _ := indexToVethIPs(t.TunnelIndex)
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)

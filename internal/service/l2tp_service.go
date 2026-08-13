@@ -282,6 +282,93 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 	return nil
 }
 
+// ReloadRoutes menerapkan perubahan monitoring subnet pada tunnel L2TP.
+//
+// Dua lapis, karena sesi PPP bisa saja belum terbentuk:
+//
+//  1. Tulis ulang /etc/ppp/routes.<ns> — sumber kebenaran yang dibaca ip-up
+//     setiap kali MikroTik dial masuk. Ini SELALU dilakukan.
+//  2. Kalau interface ppp untuk namespace ini sudah hidup, terapkan selisihnya
+//     langsung supaya tidak perlu menunggu dial ulang.
+//
+// PENTING — keterbatasan yang diketahui: ip-up memasang `ip route add default
+// dev ppp` di dalam namespace (lihat installIPUpScript). Selama default route
+// itu ada, SELURUH trafik keluar namespace sudah masuk tunnel, sehingga
+// menambah/menghapus subnet spesifik praktis tidak mengubah jangkauan. Route
+// per-subnet tetap dikelola di sini agar tetap benar bila default route hilang
+// (mis. sesi PPP putus sebagian) dan agar berhenti berperilaku berbeda dari
+// WireGuard. Perilaku ini belum diverifikasi di lab.
+//
+// Pemanggil wajib memegang setupMu.
+func (s *L2TPService) ReloadRoutes(t *tunnel.ResellerTunnel, oldSubnets []string) error {
+	routesPath := filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace))
+	routesData := strings.Join(effectiveSubnets(t.MonitoringSubnets), "\n") + "\n"
+	if err := os.WriteFile(routesPath, []byte(routesData), 0600); err != nil {
+		return fmt.Errorf("write routes file: %w", err)
+	}
+
+	ifName := s.findPPPInterface(t.Namespace)
+	if ifName == "" {
+		s.log.Info("ReloadRoutes: no active ppp session, routes file updated only",
+			zap.String("namespace", t.Namespace))
+		return nil
+	}
+
+	added, removed := tunnel.DiffSubnets(
+		effectiveSubnets(oldSubnets),
+		effectiveSubnets(t.MonitoringSubnets),
+	)
+
+	for _, subnet := range removed {
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "del", subnet, "dev", ifName); err != nil {
+			s.log.Warn("ReloadRoutes: remove route failed (continuing)",
+				zap.String("subnet", subnet), zap.Error(err))
+		}
+	}
+	for _, subnet := range added {
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", subnet, "dev", ifName); err != nil {
+			return fmt.Errorf("add route %s: %w", subnet, err)
+		}
+	}
+
+	s.log.Info("ReloadRoutes: applied",
+		zap.String("namespace", t.Namespace),
+		zap.String("interface", ifName),
+		zap.Strings("added", added),
+		zap.Strings("removed", removed),
+	)
+	return nil
+}
+
+// findPPPInterface mengembalikan nama interface ppp di dalam namespace, atau
+// string kosong bila belum ada.
+//
+// Nama interface tidak bisa diturunkan dari data tunnel: pppd yang menentukan
+// nomornya saat MikroTik dial masuk, dan nomor itu berubah tiap sesi. Satu-
+// satunya cara adalah membacanya dari kernel.
+func (s *L2TPService) findPPPInterface(ns string) string {
+	out, err := s.nsSvc.ExecInNS(ns, "ip", "-o", "link", "show")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// Format `ip -o link show`: "3: ppp0: <POINTOPOINT,...> mtu 1400 ..."
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(parts[1])
+		// Buang sufiks "@if4" pada interface berpasangan.
+		if at := strings.Index(name, "@"); at != -1 {
+			name = name[:at]
+		}
+		if strings.HasPrefix(name, "ppp") {
+			return name
+		}
+	}
+	return ""
+}
+
 func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 	s.log.Info("Tearing down L2TP/IPSec tunnel (Global Mode)",
 		zap.String("namespace", t.Namespace),

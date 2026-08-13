@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -45,6 +46,51 @@ func (s *NamespaceService) Delete(ns string) error {
 func (s *NamespaceService) Exists(ns string) bool {
 	err := run("ip", "netns", "exec", ns, "true")
 	return err == nil
+}
+
+// ListRoutes mengembalikan prefix tujuan dari tabel route di dalam namespace,
+// yaitu route yang BENAR-BENAR terpasang — bukan yang tercatat di database.
+//
+// Keduanya bisa berbeda: `ip route add` yang gagal saat Setup hanya di-log
+// sebagai warning dan tunnel tetap dilaporkan aktif, sehingga UI yang membaca
+// database saja akan mengklaim subnet termonitor padahal paketnya tidak pernah
+// masuk tunnel. Fungsi ini dipakai untuk menampilkan kenyataan tersebut.
+//
+// Default route dinormalkan menjadi "0.0.0.0/0" karena `ip route` menuliskannya
+// sebagai "default", dan host tunggal dinormalkan ke "/32" supaya sebanding
+// dengan bentuk kanonik dari NormalizeSubnets.
+//
+// Mengembalikan slice kosong bila namespace tidak ada atau perintah gagal:
+// pemanggilnya adalah jalur tampilan status, yang tidak boleh gagal total
+// hanya karena route tidak terbaca.
+func (s *NamespaceService) ListRoutes(ns, ifName string) []string {
+	out, err := s.ExecInNS(ns, "ip", "-4", "route", "show", "dev", ifName)
+	if err != nil {
+		s.log.Debug("ListRoutes: failed to read routes",
+			zap.String("ns", ns), zap.String("if", ifName), zap.Error(err))
+		return []string{}
+	}
+
+	routes := make([]string, 0, 8)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		routes = append(routes, normalizeRouteDst(fields[0]))
+	}
+	return routes
+}
+
+// normalizeRouteDst menyamakan bentuk tujuan route dengan bentuk kanonik CIDR.
+func normalizeRouteDst(dst string) string {
+	if dst == "default" {
+		return "0.0.0.0/0"
+	}
+	if !strings.Contains(dst, "/") {
+		return dst + "/32"
+	}
+	return dst
 }
 
 func (s *NamespaceService) ExecInNS(ns string, name string, args ...string) ([]byte, error) {

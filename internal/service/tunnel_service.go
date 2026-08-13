@@ -134,6 +134,131 @@ func (s *TunnelService) List(ctx context.Context, filter tunnel.Filter) ([]tunne
 	return s.repo.FindAll(ctx, filter)
 }
 
+// UpdateSubnetsRequest adalah satu-satunya perubahan yang diizinkan pada tunnel
+// yang sudah dibuat.
+//
+// Field lain sengaja TIDAK ada di sini, bukan sekadar diabaikan: identitas
+// tunnel (vpn_type, namespace, tunnel_index, IP & key) diturunkan dari
+// tunnel_index dan dirujuk banyak tempat, sementara kredensial router hanya
+// berlaku saat Provision sehingga mengubahnya lewat jalur ini akan menyesatkan.
+type UpdateSubnetsRequest struct {
+	Subnets []string `json:"monitoring_subnets"`
+	// UpdatedAt adalah nilai yang dibaca klien saat memuat form. Dipakai
+	// sebagai optimistic lock; kosong berarti klien tidak mengirim versi dan
+	// permintaan ditolak, supaya edit buta tidak menimpa perubahan orang lain.
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// UpdateSubnets mengganti monitoring subnet sebuah tunnel dan, bila tunnel
+// sedang aktif, menerapkannya ke runtime tanpa memutus koneksi.
+//
+// Urutannya DB dulu baru runtime, dengan rollback bila runtime gagal. Alasan:
+// kegagalan menulis DB meninggalkan runtime tak tersentuh (aman), sedangkan
+// kegagalan runtime setelah DB commit akan membuat UI menampilkan subnet yang
+// tidak benar-benar terpasang — itulah yang di-rollback.
+//
+// Memegang setupMu sepanjang operasi karena menyentuh tabel route dan peer
+// WireGuard di namespace yang sama dengan Activate/Deactivate/Provision dan
+// recovery otomatis health monitor.
+func (s *TunnelService) UpdateSubnets(
+	ctx context.Context,
+	id uuid.UUID,
+	req UpdateSubnetsRequest,
+) (*tunnel.ResellerTunnel, error) {
+	if req.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("%w: updated_at wajib diisi untuk mencegah penimpaan perubahan orang lain", tunnel.ErrConflict)
+	}
+
+	normalized, err := tunnel.NormalizeSubnets(req.Subnets, s.vpsPublicIP)
+	if err != nil {
+		return nil, err
+	}
+
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	t, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	oldSubnets := t.MonitoringSubnets
+
+	newUpdatedAt, err := s.repo.UpdateSubnets(ctx, id, normalized, req.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	t.MonitoringSubnets = normalized
+	t.UpdatedAt = newUpdatedAt
+
+	// Tunnel non-aktif tidak punya runtime untuk disentuh; subnet baru akan
+	// terpasang sendiri lewat Setup saat Activate.
+	if !t.IsActive() {
+		s.log.Info("Monitoring subnets updated (tunnel inactive, applied on next activate)",
+			zap.String("id", id.String()),
+			zap.Strings("subnets", normalized),
+		)
+		return t, nil
+	}
+
+	if err := s.reloadRuntimeRoutes(t, oldSubnets); err != nil {
+		// Runtime menolak perubahan. Kembalikan DB ke nilai lama supaya tidak
+		// ada selisih diam-diam antara yang ditampilkan UI dan yang benar-benar
+		// terpasang di VPS.
+		if _, rbErr := s.repo.UpdateSubnets(ctx, id, oldSubnets, newUpdatedAt); rbErr != nil {
+			s.log.Error("CRITICAL: reload failed and DB rollback also failed; DB now disagrees with VPS runtime",
+				zap.String("id", id.String()),
+				zap.Strings("db_subnets", normalized),
+				zap.Strings("runtime_subnets", oldSubnets),
+				zap.NamedError("reload_error", err),
+				zap.NamedError("rollback_error", rbErr),
+			)
+		}
+		return nil, fmt.Errorf("apply subnets to runtime: %w", err)
+	}
+
+	s.log.Info("Monitoring subnets updated and applied live",
+		zap.String("id", id.String()),
+		zap.Strings("old", oldSubnets),
+		zap.Strings("new", normalized),
+	)
+	return t, nil
+}
+
+// reloadRuntimeRoutes mendelegasikan reload ke service sesuai tipe VPN.
+//
+// Namespace yang hilang ditangani lewat RecoverTunnel-style rebuild: tanpa itu
+// reload gagal dan operator melihat error, padahal akar masalahnya runtime yang
+// memang perlu dibangun ulang.
+//
+// Pemanggil wajib memegang setupMu.
+func (s *TunnelService) reloadRuntimeRoutes(t *tunnel.ResellerTunnel, oldSubnets []string) error {
+	if !s.nsSvc.Exists(t.Namespace) {
+		s.log.Warn("Namespace missing during subnet reload, rebuilding runtime",
+			zap.String("namespace", t.Namespace))
+		if err := s.nsSvc.Create(t.Namespace); err != nil {
+			return fmt.Errorf("recreate namespace: %w", err)
+		}
+		// Setup membaca t.MonitoringSubnets yang sudah baru, jadi tidak perlu
+		// reload terpisah setelahnya.
+		switch t.VPNType {
+		case tunnel.VPNTypeWireGuard:
+			return s.wgSvc.Setup(t)
+		case tunnel.VPNTypeL2TP:
+			return s.l2tpSvc.Setup(t)
+		}
+		return fmt.Errorf("unknown vpn type %q", t.VPNType)
+	}
+
+	switch t.VPNType {
+	case tunnel.VPNTypeWireGuard:
+		return s.wgSvc.ReloadRoutes(t, oldSubnets)
+	case tunnel.VPNTypeL2TP:
+		return s.l2tpSvc.ReloadRoutes(t, oldSubnets)
+	}
+	return fmt.Errorf("unknown vpn type %q", t.VPNType)
+}
+
 func (s *TunnelService) Activate(ctx context.Context, id uuid.UUID) error {
 	t, err := s.repo.FindByID(ctx, id)
 	if err != nil {
@@ -377,11 +502,19 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 		MikrotikIP:     "0.0.0.0",
 	}
 
+	// ConfiguredSubnets adalah daftar efektif (sudah termasuk fallback
+	// RFC-1918), bukan kolom mentah: daftar kosong di DB tetap memasang tiga
+	// range privat sebagai route, dan menampilkannya sebagai "kosong" membuat
+	// operator mengira tunnel tidak memonitor apa pun.
+	status.ConfiguredSubnets = effectiveSubnets(t.MonitoringSubnets)
+
 	if t.IsActive() && s.nsSvc.Exists(t.Namespace) {
 		peerIP := extractIP(t.ClientIPAddress)
 		out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "1", "-W", "2", peerIP)
 		status.PeerReachable = err == nil
 		_ = out
+
+		status.ActiveSubnets = s.activeRoutes(t)
 	}
 
 	// Try to fetch Mikrotik status
@@ -612,6 +745,36 @@ type TunnelStatus struct {
 	MikrotikIP     string        `json:"mikrotik_ip,omitempty"`
 	MikrotikUptime string        `json:"mikrotik_uptime,omitempty"`
 	Uptime         string        `json:"uptime,omitempty"`
+
+	// ConfiguredSubnets adalah daftar efektif yang SEHARUSNYA terpasang
+	// (monitoring_subnets, atau default RFC-1918 bila kosong).
+	ConfiguredSubnets []string `json:"configured_subnets"`
+	// ActiveSubnets adalah route yang BENAR-BENAR ada di namespace VPS. Hanya
+	// terisi saat tunnel aktif. Selisih terhadap ConfiguredSubnets menandakan
+	// route gagal terpasang — kondisi yang selama ini tak terlihat karena
+	// kegagalannya hanya di-log sebagai warning.
+	ActiveSubnets []string `json:"active_subnets"`
+}
+
+// activeRoutes membaca route yang terpasang di namespace tunnel.
+//
+// Nama interface berbeda per tipe VPN: WireGuard memakai nama tetap
+// wg-<namespace>, sedangkan L2TP memakai interface ppp yang nomornya
+// ditentukan pppd saat MikroTik dial masuk sehingga harus dicari dulu.
+func (s *TunnelService) activeRoutes(t *tunnel.ResellerTunnel) []string {
+	switch t.VPNType {
+	case tunnel.VPNTypeWireGuard:
+		return s.nsSvc.ListRoutes(t.Namespace, fmt.Sprintf("wg-%s", t.Namespace))
+	case tunnel.VPNTypeL2TP:
+		ifName := s.l2tpSvc.findPPPInterface(t.Namespace)
+		if ifName == "" {
+			// Sesi PPP belum terbentuk — belum ada route sama sekali, bukan
+			// kegagalan.
+			return []string{}
+		}
+		return s.nsSvc.ListRoutes(t.Namespace, ifName)
+	}
+	return []string{}
 }
 
 func extractIP(cidr string) string {

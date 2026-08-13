@@ -238,6 +238,58 @@ func (r *TunnelRepository) Save(ctx context.Context, t *tunnel.ResellerTunnel) e
 	return nil
 }
 
+// UpdateSubnets mengganti monitoring_subnets satu tunnel dengan optimistic
+// locking terhadap expectedUpdatedAt.
+//
+// Sengaja TIDAK memakai Save(): Save adalah upsert seluruh baris, sehingga dua
+// operator yang membuka form bersamaan akan saling menimpa tanpa peringatan —
+// termasuk menimpa kolom yang tidak mereka sentuh. Di sini hanya satu kolom
+// yang ditulis, dan klausa updated_at menolak penulisan bila baris sudah
+// berubah sejak pemanggil membacanya.
+//
+// Mengembalikan tunnel.ErrConflict bila tidak ada baris yang cocok padahal
+// tunnel-nya ada (artinya updated_at sudah bergeser), dan tunnel.ErrNotFound
+// bila baris memang tidak ada.
+//
+// updated_at yang baru dikembalikan agar pemanggil dapat mengirimkannya ke
+// klien untuk siklus edit berikutnya.
+func (r *TunnelRepository) UpdateSubnets(
+	ctx context.Context,
+	id uuid.UUID,
+	subnets []string,
+	expectedUpdatedAt time.Time,
+) (time.Time, error) {
+	var newUpdatedAt time.Time
+
+	err := r.db.DB.QueryRowxContext(ctx, `
+		UPDATE reseller_tunnels
+		SET monitoring_subnets = $1, updated_at = NOW()
+		WHERE id = $2 AND updated_at = $3
+		RETURNING updated_at`,
+		pq.StringArray(subnets), id, expectedUpdatedAt,
+	).Scan(&newUpdatedAt)
+
+	if err == nil {
+		return newUpdatedAt, nil
+	}
+	if err != sql.ErrNoRows {
+		return time.Time{}, fmt.Errorf("update subnets: %w", err)
+	}
+
+	// Nol baris ter-update: bedakan "tunnel tidak ada" dari "sudah diubah
+	// orang lain" supaya operator dapat pesan yang benar — 404 vs 409.
+	var exists bool
+	if e := r.db.DB.QueryRowxContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM reseller_tunnels WHERE id = $1)`, id,
+	).Scan(&exists); e != nil {
+		return time.Time{}, fmt.Errorf("update subnets: check existence: %w", e)
+	}
+	if !exists {
+		return time.Time{}, tunnel.ErrNotFound
+	}
+	return time.Time{}, tunnel.ErrConflict
+}
+
 func (r *TunnelRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status tunnel.Status, lastError string) error {
 	_, err := r.db.DB.ExecContext(ctx,
 		`UPDATE reseller_tunnels SET status = $1, last_error = $2, updated_at = NOW() WHERE id = $3`,
