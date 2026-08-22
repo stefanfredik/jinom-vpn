@@ -23,17 +23,32 @@ func NewTunnelHandler(svc *service.TunnelService, log *zap.Logger) *TunnelHandle
 }
 
 func (h *TunnelHandler) List(c *fiber.Ctx) error {
-	page, _ := strconv.Atoi(c.Query("page", "1"))
-	limit, _ := strconv.Atoi(c.Query("limit", "50"))
+	page, err := strconv.Atoi(c.Query("page", "1"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	limit, err := strconv.Atoi(c.Query("limit", "50"))
+	if err != nil || limit < 1 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
 
 	filter := tunnel.Filter{Page: page, Limit: limit}
 
 	if v := c.Query("company_id"); v != "" {
-		id, _ := strconv.ParseInt(v, 10, 64)
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return badRequest(c, "invalid company_id")
+		}
 		filter.CompanyID = &id
 	}
 	if v := c.Query("reseller_id"); v != "" {
-		id, _ := strconv.ParseInt(v, 10, 64)
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return badRequest(c, "invalid reseller_id")
+		}
 		filter.ResellerID = &id
 	}
 	if v := c.Query("status"); v != "" {
@@ -78,11 +93,6 @@ func (h *TunnelHandler) Create(c *fiber.Ctx) error {
 	})
 }
 
-// UpdateSubnets menangani PATCH /tunnels/:id/subnets.
-//
-// Path-nya spesifik (bukan PATCH /tunnels/:id) supaya kontraknya jujur: hanya
-// monitoring subnet yang dapat diubah setelah tunnel dibuat, dan tidak ada
-// celah untuk menyelundupkan field lain lewat body.
 func (h *TunnelHandler) UpdateSubnets(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -119,63 +129,6 @@ func (h *TunnelHandler) Get(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    dto.ToTunnelResponse(t),
-	})
-}
-
-func (h *TunnelHandler) GetStatus(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return badRequest(c, "invalid tunnel id")
-	}
-
-	status, err := h.svc.GetStatus(c.Context(), id)
-	if err != nil {
-		return handleTunnelError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": dto.TunnelStatusResponse{
-			ID:                status.ID,
-			Status:            string(status.Status),
-			Namespace:         status.Namespace,
-			LastError:         status.LastError,
-			PeerReachable:     status.PeerReachable,
-			MikrotikStatus:    status.MikrotikStatus,
-			MikrotikIP:        status.MikrotikIP,
-			MikrotikUptime:    status.MikrotikUptime,
-			Uptime:            status.Uptime,
-			ConfiguredSubnets: status.ConfiguredSubnets,
-			ActiveSubnets:     status.ActiveSubnets,
-		},
-	})
-}
-
-func (h *TunnelHandler) GetScript(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return badRequest(c, "invalid tunnel id")
-	}
-
-	// Assuming the VPS public IP is passed via an environment variable or configuration.
-	// We'll use the same VPS IP logic that Provision uses.
-	// Since TunnelHandler doesn't have direct access to vpsPublicIP, we need it.
-	// Ah wait, s.vpsPublicIP is inside TunnelService. TunnelService.GenerateRouterOSScript
-	// should just get the vpsPublicIP from its own field!
-	// Oh, I passed vpsPublicIP as an argument to GenerateRouterOSScript. Let me check if TunnelService has a getter or if I can just remove the argument. Let me check that. 
-	// For now, I'll pass an empty string and we will see if we need to modify GenerateRouterOSScript. No, let's fix GenerateRouterOSScript to not need it!
-	
-	// Generate the script using the service which has access to vpsPublicIP internally
-	script, err := h.svc.GenerateRouterOSScript(c.Context(), id)
-	if err != nil {
-		return handleTunnelError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"script": script,
-		},
 	})
 }
 
@@ -235,166 +188,4 @@ func (h *TunnelHandler) Delete(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "tunnel deleted"})
-}
-
-func (h *TunnelHandler) GetMetrics(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return badRequest(c, "invalid tunnel id")
-	}
-	limit, _ := strconv.Atoi(c.Query("limit", "100"))
-
-	metrics, err := h.svc.GetMetrics(c.Context(), id, limit)
-	if err != nil {
-		return internalError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    metrics,
-	})
-}
-
-func (h *TunnelHandler) GetHistory(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return badRequest(c, "invalid tunnel id")
-	}
-	limit, _ := strconv.Atoi(c.Query("limit", "50"))
-
-	history, err := h.svc.GetStatusHistory(c.Context(), id, limit)
-	if err != nil {
-		return internalError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    history,
-	})
-}
-
-func handleTunnelError(c *fiber.Ctx, err error) error {
-	if errors.Is(err, tunnel.ErrNotFound) {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"success": false,
-			"error":   fiber.Map{"code": "NOT_FOUND", "message": "tunnel not found"},
-		})
-	}
-	// Subnet tidak valid adalah kesalahan input operator, bukan kegagalan
-	// server: pesan aslinya diteruskan karena menyebut CIDR mana yang ditolak
-	// dan alasannya.
-	if errors.Is(err, tunnel.ErrInvalidSubnet) {
-		return badRequest(c, err.Error())
-	}
-	if errors.Is(err, tunnel.ErrConflict) {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"success": false,
-			"error": fiber.Map{
-				"code":    "CONFLICT",
-				"message": "Tunnel sudah diubah oleh orang lain. Muat ulang halaman lalu coba lagi.",
-			},
-		})
-	}
-	return internalError(c, err)
-}
-
-func badRequest(c *fiber.Ctx, message string) error {
-	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-		"success": false,
-		"error":   fiber.Map{"code": "BAD_REQUEST", "message": message},
-	})
-}
-
-func internalError(c *fiber.Ctx, err error) error {
-	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-		"success": false,
-		"error":   fiber.Map{"code": "INTERNAL_ERROR", "message": err.Error()},
-	})
-}
-
-func (h *TunnelHandler) SelectNOCReseller(c *fiber.Ctx) error {
-	id, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return badRequest(c, "invalid tunnel id")
-	}
-
-	var req struct {
-		TechnicianIP string `json:"technician_ip"`
-	}
-	if len(c.Body()) > 0 {
-		_ = c.BodyParser(&req)
-	}
-
-	if req.TechnicianIP == "" {
-		req.TechnicianIP = c.IP()
-	}
-
-	if err := h.svc.SelectNOCReseller(c.Context(), req.TechnicianIP, id); err != nil {
-		return internalError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"message": "NOC routing configured successfully",
-		"mapped_ip": req.TechnicianIP,
-	})
-}
-
-func (h *TunnelHandler) CreateNOCTechnician(c *fiber.Ctx) error {
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return badRequest(c, "invalid request body")
-	}
-
-	if req.Name == "" {
-		return badRequest(c, "technician name is required")
-	}
-
-	ip, config, err := h.svc.CreateNOCTechnician(c.Context(), req.Name)
-	if err != nil {
-		return internalError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"name":   req.Name,
-			"ip":     ip,
-			"config": config,
-		},
-	})
-}
-
-func (h *TunnelHandler) ListNOCTechnicians(c *fiber.Ctx) error {
-	users, err := h.svc.ListNOCTechnicians(c.Context())
-	if err != nil {
-		return internalError(c, err)
-	}
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data":    users,
-	})
-}
-
-func (h *TunnelHandler) DeleteNOCTechnician(c *fiber.Ctx) error {
-	var req struct {
-		PublicKey string `json:"public_key"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return badRequest(c, "invalid request body")
-	}
-	if req.PublicKey == "" {
-		return badRequest(c, "public_key is required")
-	}
-
-	if err := h.svc.DeleteNOCTechnician(c.Context(), req.PublicKey); err != nil {
-		return internalError(c, err)
-	}
-
-	return c.JSON(fiber.Map{
-		"success": true,
-		"message": "NOC technician deleted successfully",
-	})
 }

@@ -16,9 +16,6 @@ type RouterDeps struct {
 func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	app.Get("/health", deps.HealthHandler.Health)
 
-	// Serve Static Dashboard
-	app.Static("/", "./web")
-
 	api := app.Group("/api/v1", middleware.APIKeyAuth(deps.APIKey))
 	api.Post("/noc/users", deps.TunnelHandler.CreateNOCTechnician)
 	api.Get("/noc/users", deps.TunnelHandler.ListNOCTechnicians)

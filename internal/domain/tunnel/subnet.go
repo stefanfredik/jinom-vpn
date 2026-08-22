@@ -6,17 +6,9 @@ import (
 	"strings"
 )
 
-// NormalizeSubnets memvalidasi dan membakukan daftar monitoring subnet.
-//
-// Mengembalikan daftar bersih dalam bentuk kanonik (hasil ParseCIDR, host bits
-// sudah di-mask) tanpa duplikat, dengan urutan input dipertahankan.
-//
-// vpsPublicIP adalah IP publik VPS; subnet yang mencakupnya ditolak karena
-// route-nya akan dipasang di dalam namespace dan membajak trafik balik ke VPS
-// itu sendiri. Boleh kosong kalau pemanggil tidak tahu IP-nya — pengecekan
-// tersebut lalu dilewati.
-//
-// Daftar kosong adalah input sah: artinya "pakai default RFC-1918".
+// NormalizeSubnets validates and canonicalizes the monitoring subnet list.
+// Returns a clean list of canonical CIDRs without duplicates.
+// Subnets encompassing the VPS public IP are rejected to prevent routing hijacking.
 func NormalizeSubnets(subnets []string, vpsPublicIP string) ([]string, error) {
 	out := make([]string, 0, len(subnets))
 	seen := make(map[string]struct{}, len(subnets))
@@ -45,30 +37,19 @@ func NormalizeSubnets(subnets []string, vpsPublicIP string) ([]string, error) {
 	return out, nil
 }
 
-// canonicalizeCIDR mengubah "192.168.1.5/24" menjadi "192.168.1.0/24".
-//
-// Menerima bentuk CIDR saja, bukan IP telanjang: "192.168.1.5" tanpa prefix
-// hampir selalu salah ketik dari "/32" atau "/24", dan menebaknya diam-diam
-// memasang route yang tidak diniatkan operator.
+// canonicalizeCIDR converts an IP string into canonical CIDR form (e.g. "192.168.1.5/24" -> "192.168.1.0/24").
 func canonicalizeCIDR(s string) (string, error) {
 	ip, ipNet, err := net.ParseCIDR(s)
 	if err != nil {
-		return "", fmt.Errorf("%w: %q bukan CIDR yang valid (contoh: 192.168.1.0/24)", ErrInvalidSubnet, s)
+		return "", fmt.Errorf("%w: %q is not a valid CIDR (e.g. 192.168.1.0/24)", ErrInvalidSubnet, s)
 	}
 	if ip.To4() == nil {
-		return "", fmt.Errorf("%w: %q adalah IPv6, hanya IPv4 yang didukung", ErrInvalidSubnet, s)
+		return "", fmt.Errorf("%w: %q is IPv6, only IPv4 is currently supported", ErrInvalidSubnet, s)
 	}
 	return ipNet.String(), nil
 }
 
-// rejectDangerousSubnet menolak prefix yang akan merusak konektivitas VPS.
-//
-// Dua kelas yang ditolak:
-//
-//   - Default route (0.0.0.0/0) — mengubah namespace jadi full-tunnel tanpa
-//     diniatkan; semua trafik keluar namespace dibuang ke router reseller.
-//   - Prefix yang mencakup IP publik VPS — route balik ke VPS ikut masuk
-//     tunnel, memutus jalur manajemen (SSH) dan underlay WireGuard.
+// rejectDangerousSubnet rejects default routes and routes containing VPS public IP.
 func rejectDangerousSubnet(cidr, vpsPublicIP string) error {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -76,12 +57,12 @@ func rejectDangerousSubnet(cidr, vpsPublicIP string) error {
 	}
 
 	if ones, _ := ipNet.Mask.Size(); ones == 0 {
-		return fmt.Errorf("%w: %q adalah default route dan akan memutus konektivitas VPS", ErrInvalidSubnet, cidr)
+		return fmt.Errorf("%w: %q is a default route and would disrupt VPS connectivity", ErrInvalidSubnet, cidr)
 	}
 
 	if vpsPublicIP != "" {
 		if vpsIP := net.ParseIP(vpsPublicIP); vpsIP != nil && ipNet.Contains(vpsIP) {
-			return fmt.Errorf("%w: %q mencakup IP publik VPS (%s) dan akan memutus akses ke server",
+			return fmt.Errorf("%w: %q encompasses VPS public IP (%s) and would break server management traffic",
 				ErrInvalidSubnet, cidr, vpsPublicIP)
 		}
 	}
@@ -89,14 +70,7 @@ func rejectDangerousSubnet(cidr, vpsPublicIP string) error {
 	return nil
 }
 
-// DiffSubnets menghitung perubahan dari oldSubnets ke newSubnets.
-//
-// Dipakai reload runtime supaya hanya route yang benar-benar berubah yang
-// disentuh — menghapus lalu memasang ulang seluruh daftar akan membuang paket
-// pada subnet yang sebenarnya tidak berubah.
-//
-// Kedua input diasumsikan sudah lewat NormalizeSubnets sehingga perbandingan
-// string cukup (bentuknya sudah kanonik).
+// DiffSubnets computes added and removed subnets between oldSubnets and newSubnets.
 func DiffSubnets(oldSubnets, newSubnets []string) (added, removed []string) {
 	oldSet := make(map[string]struct{}, len(oldSubnets))
 	for _, s := range oldSubnets {

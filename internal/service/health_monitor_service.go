@@ -2,10 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
-	"regexp"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,14 +10,9 @@ import (
 	"github.com/jinom/vpn/internal/domain/tunnel"
 )
 
-var (
-	pingLossRegex    = regexp.MustCompile(`([\d.]+)% packet loss`)
-	pingLatencyRegex = regexp.MustCompile(`rtt min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms`)
-)
-
 type tunnelHealthState struct {
-	failCount    int
-	lastRecovery time.Time
+	failCount     int
+	lastRecovery  time.Time
 	recoveryCount int
 }
 
@@ -40,20 +31,13 @@ type HealthMonitorService struct {
 	wg            sync.WaitGroup
 	states        map[string]*tunnelHealthState
 	mu            sync.Mutex
-	// recoverFn performs a locked teardown+setup of a tunnel. Injected by
-	// SetRecoverHook (wired to TunnelService.RecoverTunnel) so recovery runs
-	// under the same setupMu as operator actions, avoiding races. Optional —
-	// if nil, attemptRecovery falls back to direct wg/l2tp calls (unlocked).
-	recoverFn func(t *tunnel.ResellerTunnel) error
+	recoverFn     func(t *tunnel.ResellerTunnel) error
 }
 
-// SetRecoverHook registers the function used to recover an unhealthy tunnel.
-// Wired in main.go to TunnelService.RecoverTunnel so recovery holds setupMu.
 func (s *HealthMonitorService) SetRecoverHook(fn func(t *tunnel.ResellerTunnel) error) {
 	s.recoverFn = fn
 }
 
-// SetWorkerCount configures the maximum concurrent worker goroutines for health checks.
 func (s *HealthMonitorService) SetWorkerCount(count int) {
 	if count > 0 {
 		s.workerCount = count
@@ -130,9 +114,6 @@ func (s *HealthMonitorService) getState(id string) *tunnelHealthState {
 	return st
 }
 
-// Forget melepas state map entry untuk tunnel id. Dipanggil oleh
-// TunnelService.Delete supaya struct in-memory `states` tidak terus tumbuh
-// setelah banyak tunnel dihapus. Aman dipanggil dengan ID tidak dikenal.
 func (s *HealthMonitorService) Forget(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,9 +121,6 @@ func (s *HealthMonitorService) Forget(id string) {
 }
 
 func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
-	// Include 'down' tunnels, not just 'active': a tunnel marked down must keep
-	// being probed so handleSuccess can transition it back to active once it
-	// recovers. Probing active-only would leave 'down' a terminal state.
 	tunnels, err := s.repo.FindActiveOrDown(ctx)
 	if err != nil {
 		s.log.Error("Failed to fetch tunnels for health check", zap.Error(err))
@@ -153,7 +131,6 @@ func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 		return
 	}
 
-	// Dynamic worker pool for parallel tunnel health checks
 	workerCount := s.workerCount
 	if workerCount <= 0 {
 		workerCount = 20
@@ -189,316 +166,5 @@ func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
 	close(jobs)
 
 	wg.Wait()
-
-	// Lazy purge: pasangan-pengaman untuk Forget() — kalau ada path delete
-	// yang lupa memanggil Forget, ID yang sudah tidak muncul di FindActive
-	// tetap dibersihkan satu siklus kemudian.
 	s.purgeStale(tunnels)
-}
-
-// purgeStale menghapus entri map states yang tidak lagi merupakan tunnel
-// aktif. Bukan pengganti Forget(): Forget() langsung saat delete, purgeStale
-// hanya jaring pengaman.
-func (s *HealthMonitorService) purgeStale(active []tunnel.ResellerTunnel) {
-	live := make(map[string]struct{}, len(active))
-	for i := range active {
-		live[active[i].ID.String()] = struct{}{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id := range s.states {
-		if _, ok := live[id]; !ok {
-			delete(s.states, id)
-		}
-	}
-}
-
-func (s *HealthMonitorService) checkTunnel(ctx context.Context, t *tunnel.ResellerTunnel) {
-	metric := &tunnel.TunnelMetric{
-		TunnelID:  t.ID,
-		Timestamp: time.Now(),
-	}
-
-	if !s.nsSvc.Exists(t.Namespace) {
-		s.handleFailure(ctx, t, "namespace does not exist")
-		return
-	}
-
-	// WireGuard tunnels are evaluated by handshake freshness rather than ICMP:
-	// a MikroTik with firewall may silently drop pings while the tunnel itself
-	// is healthy, and conversely a peer can be ICMP-reachable for a few seconds
-	// after its WireGuard session has actually expired.
-	if t.VPNType == tunnel.VPNTypeWireGuard {
-		s.checkWireGuard(ctx, t, metric)
-		return
-	}
-
-	// L2TP: prefer the IPSec SA state. Falls back to ICMP only if statusall
-	// can't be read at all (binary missing, namespace gone, etc.).
-	if t.VPNType == tunnel.VPNTypeL2TP {
-		if handled := s.checkL2TPViaIPSec(ctx, t, metric); handled {
-			return
-		}
-	}
-
-	peerIP := extractIP(t.ClientIPAddress)
-	out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "2", "-W", "3", peerIP)
-
-	if err != nil {
-		loss := 100.0
-		metric.PacketLoss = &loss
-		s.repo.SaveMetric(ctx, metric)
-		s.handleFailure(ctx, t, "peer unreachable")
-		return
-	}
-
-	// Parse Ping
-	outStr := string(out)
-	if m := pingLossRegex.FindStringSubmatch(outStr); len(m) > 1 {
-		if loss, e := strconv.ParseFloat(m[1], 64); e == nil {
-			metric.PacketLoss = &loss
-		}
-	}
-	if m := pingLatencyRegex.FindStringSubmatch(outStr); len(m) > 1 {
-		if lat, e := strconv.ParseFloat(m[1], 64); e == nil {
-			metric.LatencyMS = &lat
-		}
-	}
-
-	// Fetch Wireguard Rx/Tx if applicable
-	if t.VPNType == tunnel.VPNTypeWireGuard {
-		ifName := fmt.Sprintf("wg-%s", t.Namespace)
-		if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "transfer"); e == nil {
-			parts := strings.Fields(string(wgOut))
-			if len(parts) >= 3 {
-				if rx, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil {
-					metric.RxBytes = &rx
-				}
-				if tx, e2 := strconv.ParseInt(parts[2], 10, 64); e2 == nil {
-					metric.TxBytes = &tx
-				}
-			}
-		}
-		if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "latest-handshakes"); e == nil {
-			parts := strings.Fields(string(wgOut))
-			if len(parts) >= 2 {
-				if ts, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil && ts > 0 {
-					ht := time.Unix(ts, 0)
-					metric.HandshakeTime = &ht
-				}
-			}
-		}
-	}
-
-	// Save Metric
-	s.repo.SaveMetric(ctx, metric)
-
-	s.handleSuccess(ctx, t)
-}
-
-func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.ResellerTunnel, reason string) {
-	st := s.getState(t.ID.String())
-
-	s.mu.Lock()
-	st.failCount++
-	count := st.failCount
-	s.mu.Unlock()
-
-	if count < s.failThreshold {
-		return
-	}
-
-	// At/over threshold every tick now. Attempt recovery if allowed; the
-	// cooldown + maxRecoveries cap keep it from firing more than once per 5
-	// minutes and no more than maxRecoveries times. We deliberately key on
-	// count >= threshold (not == threshold): after the cooldown expires the
-	// failCount is already past the threshold, and an exact-match check would
-	// permanently stop retrying.
-	s.mu.Lock()
-	canRecover := st.recoveryCount < s.maxRecoveries &&
-		time.Since(st.lastRecovery) > 5*time.Minute
-	if canRecover {
-		st.recoveryCount++
-		st.lastRecovery = time.Now()
-		st.failCount = 0 // give the recovered tunnel a fresh failure budget
-	}
-	s.mu.Unlock()
-
-	if canRecover {
-		s.log.Warn("Tunnel unhealthy, attempting recovery",
-			zap.String("tunnel_id", t.ID.String()),
-			zap.String("namespace", t.Namespace),
-			zap.String("reason", reason),
-			zap.Int("consecutive_failures", count),
-		)
-		s.attemptRecovery(ctx, t)
-		return
-	}
-
-	// Cannot recover right now (max attempts used up, or still within the
-	// 5-minute cooldown). Mark the tunnel down so its status reflects reality.
-	// Only write when not already down, so a persistently failing tunnel
-	// doesn't rewrite the same status + history row every tick. A later
-	// successful probe transitions it back to active via handleSuccess.
-	if t.Status != tunnel.StatusDown {
-		s.log.Warn("Tunnel marked as down (recovery unavailable)",
-			zap.String("tunnel_id", t.ID.String()),
-			zap.String("namespace", t.Namespace),
-			zap.String("reason", reason),
-		)
-		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusDown, reason)
-		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
-			TunnelID: t.ID,
-			Status:   tunnel.StatusDown,
-			Reason:   reason,
-		})
-	}
-}
-
-func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.ResellerTunnel) {
-	s.log.Info("Attempting tunnel recovery",
-		zap.String("tunnel_id", t.ID.String()),
-		zap.String("namespace", t.Namespace),
-		zap.String("vpn_type", string(t.VPNType)),
-	)
-
-	// Prefer the locked recovery hook (TunnelService.RecoverTunnel) so the
-	// teardown+setup runs under setupMu and can't race a concurrent operator
-	// action. Fall back to direct, unlocked calls only if no hook was wired.
-	var err error
-	if s.recoverFn != nil {
-		err = s.recoverFn(t)
-	} else {
-		switch t.VPNType {
-		case tunnel.VPNTypeWireGuard:
-			_ = s.wgSvc.Teardown(t)
-			err = s.wgSvc.Setup(t)
-		case tunnel.VPNTypeL2TP:
-			_ = s.l2tpSvc.Teardown(t)
-			err = s.l2tpSvc.Setup(t)
-		}
-	}
-
-	if err != nil {
-		s.log.Error("Tunnel recovery failed",
-			zap.String("tunnel_id", t.ID.String()),
-			zap.Error(err),
-		)
-		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusDown, "recovery failed: "+err.Error())
-		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
-			TunnelID: t.ID,
-			Status:   tunnel.StatusDown,
-			Reason:   "recovery failed: " + err.Error(),
-		})
-		return
-	}
-
-	s.log.Info("Tunnel recovery initiated",
-		zap.String("tunnel_id", t.ID.String()),
-	)
-}
-
-// wgHandshakeStaleAfter is how long we tolerate a peer being silent before
-// declaring it down. WireGuard's own session lifetime is ~3 min; anything
-// older than that is almost certainly a real outage.
-const wgHandshakeStaleAfter = 3 * time.Minute
-
-var ipsecSAUpRegex = regexp.MustCompile(`Security Associations \((\d+) up,`)
-
-// checkL2TPViaIPSec evaluates an L2TP tunnel by inspecting THIS tunnel's IPSec
-// SA state via its isolated charon (IPSecStatusall re-binds /run to the
-// per-tunnel runtime dir, so the count reflects only this tunnel — never SAs
-// belonging to another namespace's charon). Returns true if the verdict was
-// decided here (so the caller skips the ICMP fallback). When strongSwan output
-// can't be parsed at all we return false and let ping take over.
-func (s *HealthMonitorService) checkL2TPViaIPSec(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) bool {
-	// Disable IPSec SA check in Global Mode. Rely entirely on ICMP ping which accurately reflects interface health.
-	return false
-}
-
-func (s *HealthMonitorService) checkWireGuard(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) {
-	ifName := fmt.Sprintf("wg-%s", t.Namespace)
-
-	// Peer not yet provisioned — interface is up and waiting. Treat as
-	// healthy-pending so it doesn't churn through recovery attempts.
-	if t.ClientPublicKey == "" {
-		s.repo.SaveMetric(ctx, metric)
-		s.handleSuccess(ctx, t)
-		return
-	}
-
-	if wgOut, e := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "transfer"); e == nil {
-		parts := strings.Fields(string(wgOut))
-		if len(parts) >= 3 {
-			if rx, e2 := strconv.ParseInt(parts[1], 10, 64); e2 == nil {
-				metric.RxBytes = &rx
-			}
-			if tx, e2 := strconv.ParseInt(parts[2], 10, 64); e2 == nil {
-				metric.TxBytes = &tx
-			}
-		}
-	}
-
-	hsOut, err := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "latest-handshakes")
-	if err != nil {
-		s.repo.SaveMetric(ctx, metric)
-		s.handleFailure(ctx, t, "wg show failed: "+err.Error())
-		return
-	}
-
-	parts := strings.Fields(string(hsOut))
-	if len(parts) < 2 {
-		s.repo.SaveMetric(ctx, metric)
-		s.handleFailure(ctx, t, "no peer configured on wg interface")
-		return
-	}
-	ts, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		s.repo.SaveMetric(ctx, metric)
-		s.handleFailure(ctx, t, "unparseable handshake timestamp")
-		return
-	}
-
-	if ts == 0 {
-		// Peer was just attached and has not handshaked yet. Don't fail; the
-		// next tick will re-check after MikroTik sends its first keepalive.
-		s.repo.SaveMetric(ctx, metric)
-		s.handleSuccess(ctx, t)
-		return
-	}
-
-	last := time.Unix(ts, 0)
-	metric.HandshakeTime = &last
-	s.repo.SaveMetric(ctx, metric)
-
-	if age := time.Since(last); age > wgHandshakeStaleAfter {
-		s.handleFailure(ctx, t, fmt.Sprintf("last handshake %s ago", age.Truncate(time.Second)))
-		return
-	}
-	s.handleSuccess(ctx, t)
-}
-
-func (s *HealthMonitorService) handleSuccess(ctx context.Context, t *tunnel.ResellerTunnel) {
-	st := s.getState(t.ID.String())
-
-	s.mu.Lock()
-	prevFail := st.failCount
-	st.failCount = 0
-	if prevFail >= s.failThreshold {
-		st.recoveryCount = 0
-	}
-	s.mu.Unlock()
-
-	if t.Status == tunnel.StatusDown {
-		s.log.Info("Tunnel recovered",
-			zap.String("tunnel_id", t.ID.String()),
-			zap.String("namespace", t.Namespace),
-		)
-		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusActive, "")
-		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{
-			TunnelID: t.ID,
-			Status:   tunnel.StatusActive,
-			Reason:   "tunnel recovered",
-		})
-	}
 }

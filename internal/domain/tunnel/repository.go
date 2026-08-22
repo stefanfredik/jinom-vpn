@@ -13,15 +13,11 @@ type Repository interface {
 	FindByResellerID(ctx context.Context, resellerID int64) (*ResellerTunnel, error)
 	FindByNamespace(ctx context.Context, namespace string) (*ResellerTunnel, error)
 	FindActive(ctx context.Context) ([]ResellerTunnel, error)
-	// FindActiveOrDown returns tunnels in 'active' OR 'down' state. The health
-	// monitor uses this so a tunnel previously marked 'down' keeps being probed
-	// and can transition back to 'active' once it recovers.
+	// FindActiveOrDown returns tunnels in 'active' OR 'down' state for health monitoring.
 	FindActiveOrDown(ctx context.Context) ([]ResellerTunnel, error)
 	NextTunnelIndex(ctx context.Context) (int, error)
 	Save(ctx context.Context, t *ResellerTunnel) error
-	// UpdateSubnets mengganti monitoring_subnets dengan optimistic locking:
-	// penulisan ditolak (ErrConflict) bila updated_at di DB sudah bergeser dari
-	// expectedUpdatedAt. Mengembalikan updated_at yang baru.
+	// UpdateSubnets updates monitoring_subnets with optimistic locking against expectedUpdatedAt.
 	UpdateSubnets(ctx context.Context, id uuid.UUID, subnets []string, expectedUpdatedAt time.Time) (time.Time, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status Status, lastError string) error
 	SaveMetric(ctx context.Context, metric *TunnelMetric) error
