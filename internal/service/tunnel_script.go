@@ -58,6 +58,10 @@ func (s *TunnelService) GenerateRouterOSScript(ctx context.Context, id uuid.UUID
 	}
 
 	if vpnType == string(tunnel.VPNTypeL2TP) {
+		psk := s.l2tpSvc.GetPSK()
+		if psk == "" {
+			psk = t.PSK
+		}
 		script := fmt.Sprintf(`# JINOM NMS - L2TP/IPSec Tunnel Setup
 # VPN ID: %s
 # Execute this script in your MikroTik terminal (Winbox/WebFig)
@@ -76,7 +80,7 @@ func (s *TunnelService) GenerateRouterOSScript(ctx context.Context, id uuid.UUID
 /ip route add dst-address="10.250.0.0/16" gateway="l2tp-jinom" comment="jinom-nms"
 /ip firewall nat add chain="srcnat" action="masquerade" src-address="10.250.0.0/16" comment="JINOM NMS"
 `,
-			t.ID, vpsPublicIP, vpsPublicIP, t.L2TPUsername, t.L2TPPassword, t.PSK, t.ClientIPAddress,
+			t.ID, vpsPublicIP, vpsPublicIP, t.L2TPUsername, t.L2TPPassword, psk, t.ClientIPAddress,
 		)
 		return script, nil
 	}

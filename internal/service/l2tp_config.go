@@ -66,7 +66,9 @@ conn L2TP-PSK
 	ipsecSecrets := fmt.Sprintf(": PSK \"%s\"\n", psk)
 	_ = os.WriteFile("/etc/ipsec.secrets", []byte(ipsecSecrets), 0600)
 
+	s.psk = psk
 	s.log.Info("IPSec PSK initialized", zap.Int("length", len(psk)))
+
 
 	// 2. Setup XL2TPD Global Config
 	xl2tpdConf := `[global]

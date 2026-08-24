@@ -16,6 +16,7 @@ type L2TPService struct {
 	nsSvc       *NamespaceService
 	log         *zap.Logger
 	vpsPublicIP string
+	psk         string
 }
 
 func NewL2TPService(nsSvc *NamespaceService, vpsPublicIP string, log *zap.Logger) *L2TPService {
@@ -24,6 +25,18 @@ func NewL2TPService(nsSvc *NamespaceService, vpsPublicIP string, log *zap.Logger
 	svc.installIPUpScript()
 	return svc
 }
+
+// GetPSK returns the active global IPSec Pre-Shared Key.
+func (s *L2TPService) GetPSK() string {
+	if s.psk != "" {
+		return s.psk
+	}
+	if data, err := os.ReadFile("/etc/ipsec.d/jinom-psk"); err == nil {
+		s.psk = strings.TrimSpace(string(data))
+	}
+	return s.psk
+}
+
 
 func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 	s.log.Info("Setting up L2TP/IPSec tunnel (Global Mode)",

@@ -107,7 +107,7 @@ func (s *TunnelService) Create(ctx context.Context, req CreateTunnelRequest) (*t
 	} else {
 		t.L2TPUsername = fmt.Sprintf("jinom-res-%d", t.ResellerID)
 		t.L2TPPassword = generatePassword(24)
-		t.PSK = generatePassword(32)
+		t.PSK = s.l2tpSvc.GetPSK()
 	}
 
 	if err := s.repo.Save(ctx, t); err != nil {

@@ -69,3 +69,17 @@ func (r *TunnelRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 	return nil
 }
+
+func (r *TunnelRepository) SyncL2TPPSK(ctx context.Context, psk string) error {
+	if psk == "" {
+		return nil
+	}
+	enc := r.encryptField(psk)
+	query := `UPDATE reseller_tunnels SET psk_enc = $1, updated_at = NOW() WHERE vpn_type = 'l2tp'`
+	_, err := r.db.DB.ExecContext(ctx, query, enc)
+	if err != nil {
+		return fmt.Errorf("sync l2tp psk: %w", err)
+	}
+	return nil
+}
+

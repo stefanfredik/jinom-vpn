@@ -63,13 +63,19 @@ func main() {
 
 	tunnelRepo := postgres.NewTunnelRepository(db, cryptoSvc, zapLogger)
 
-	// NOTE: Previous hardcoded PSK migration removed. New tunnels now generate
-	// random PSKs per tunnel. Existing tunnels retain their stored PSKs.
-
 	nsSvc := service.NewNamespaceService(zapLogger)
 	wgSvc := service.NewWireGuardService(nsSvc, zapLogger)
 	l2tpSvc := service.NewL2TPService(nsSvc, cfg.VPSPublicIP, zapLogger)
 	provisionerSvc := service.NewProvisionerService(zapLogger)
+
+	// Synchronize global L2TP IPSec PSK to all tunnels in database
+	if psk := l2tpSvc.GetPSK(); psk != "" {
+		if err := tunnelRepo.SyncL2TPPSK(context.Background(), psk); err != nil {
+			zapLogger.Warn("Failed to sync L2TP PSK for existing tunnels", zap.Error(err))
+		} else {
+			zapLogger.Info("Synchronized global L2TP PSK across all database tunnels", zap.Int("psk_len", len(psk)))
+		}
+	}
 
 	vpsPublicIP := cfg.VPSPublicIP
 	if vpsPublicIP == "" {

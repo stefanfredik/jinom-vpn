@@ -101,6 +101,16 @@ func (s *TunnelService) Provision(ctx context.Context, id uuid.UUID) error {
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
 
+	if t.VPNType == tunnel.VPNTypeL2TP {
+		globalPSK := s.l2tpSvc.GetPSK()
+		if globalPSK != "" && t.PSK != globalPSK {
+			t.PSK = globalPSK
+			if err := s.repo.Save(ctx, t); err != nil {
+				s.log.Warn("Failed to sync tunnel PSK in DB", zap.Error(err))
+			}
+		}
+	}
+
 	if err := s.provisioner.Provision(t, s.vpsPublicIP); err != nil {
 		s.setError(ctx, id, err)
 		return fmt.Errorf("provision mikrotik: %w", err)

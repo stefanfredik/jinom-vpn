@@ -25,6 +25,7 @@ type Repository interface {
 	SaveStatusHistory(ctx context.Context, history *TunnelStatusHistory) error
 	GetStatusHistory(ctx context.Context, tunnelID uuid.UUID, limit int) ([]TunnelStatusHistory, error)
 	Delete(ctx context.Context, id uuid.UUID) error
+	SyncL2TPPSK(ctx context.Context, psk string) error
 }
 
 type Filter struct {
