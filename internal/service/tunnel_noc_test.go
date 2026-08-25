@@ -46,6 +46,14 @@ zGQ4ctDyNftLO+AAv+uzvhNI+fSmv2tCYtrvSJJ96Ds=	(none)	(none)	10.50.0.6/32	0	0	0	of
 			}
 		})
 	}
+
+	dumpSharedNAT := `mH3GAuPnf6STR65nyn/7DHZtdkGbc57NXiAD0gsh/VM=	Ripu7l8dtFm+Pgkea5LxrJw4nEGduM9vaQ08qlt0vyc=	51820	off
+PeerA=	(none)	103.122.65.200:64672	10.50.0.2/32	1787600000	100	100	off
+PeerB=	(none)	103.122.65.200:54321	10.50.0.5/32	1787699999	200	200	off
+`
+	if got := parseVPNIPFromDump(dumpSharedNAT, "103.122.65.200"); got != "10.50.0.5" {
+		t.Errorf("parseVPNIPFromDump() on shared NAT = %v, want 10.50.0.5 (newest handshake)", got)
+	}
 }
 
 func TestIsTechnicianTableRule(t *testing.T) {

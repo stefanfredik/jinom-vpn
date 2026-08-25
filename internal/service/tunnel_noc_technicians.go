@@ -60,7 +60,7 @@ DNS = 8.8.8.8
 
 [Peer]
 PublicKey = %s
-AllowedIPs = 10.50.0.0/24, 10.250.0.0/16, 10.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8
+AllowedIPs = 10.50.0.0/24, 10.250.0.0/16, 10.254.0.0/16, 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, 100.64.0.0/10
 Endpoint = %s:51820
 PersistentKeepalive = 25
 `, clientPriv, clientIP, serverPub, s.vpsPublicIP)

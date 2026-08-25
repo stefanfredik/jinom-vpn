@@ -112,9 +112,17 @@ func parseVPNIPFromDump(dumpOutput, endpointIP string) string {
 	if endpointIP == "" {
 		return ""
 	}
+
+	type peerCandidate struct {
+		vpnIP     string
+		handshake int64
+	}
+
+	var candidates []peerCandidate
+
 	for _, line := range strings.Split(dumpOutput, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 4 {
+		if len(fields) < 5 {
 			continue
 		}
 		endpoint := fields[2]
@@ -129,11 +137,27 @@ func parseVPNIPFromDump(dumpOutput, endpointIP string) string {
 		if host == endpointIP {
 			vpnParts := strings.Split(allowedIPs, "/")
 			if len(vpnParts) > 0 {
-				return strings.TrimSpace(strings.Split(vpnParts[0], ",")[0])
+				ip := strings.TrimSpace(strings.Split(vpnParts[0], ",")[0])
+				handshake, _ := strconv.ParseInt(fields[4], 10, 64)
+				candidates = append(candidates, peerCandidate{
+					vpnIP:     ip,
+					handshake: handshake,
+				})
 			}
 		}
 	}
-	return ""
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.handshake > best.handshake {
+			best = c
+		}
+	}
+	return best.vpnIP
 }
 
 func netSplitLines(s string) []string {

@@ -14,19 +14,19 @@ func TestEffectiveSubnets(t *testing.T) {
 		expected []string
 	}{
 		{
-			name:     "empty input includes RFC-1918 defaults",
+			name:     "empty input includes RFC-1918 and CGNAT defaults",
 			input:    nil,
-			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"},
 		},
 		{
-			name:     "custom public IP appended to RFC-1918 defaults",
+			name:     "custom public IP appended to defaults",
 			input:    []string{"203.0.113.50/32"},
-			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "203.0.113.50/32"},
+			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "203.0.113.50/32"},
 		},
 		{
-			name:     "duplicates with RFC-1918 defaults are deduplicated",
+			name:     "duplicates with defaults are deduplicated",
 			input:    []string{"10.0.0.0/8", "1.1.1.1/32"},
-			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "1.1.1.1/32"},
+			expected: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "1.1.1.1/32"},
 		},
 	}
 

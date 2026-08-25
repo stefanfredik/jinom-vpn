@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -34,22 +35,26 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	s.nocMu.Lock()
 	defer s.nocMu.Unlock()
 
-	tableID, err := s.calculateTableID(technicianIP)
+	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
+	effectiveIP := technicianIP
+	if vpnIP != "" {
+		effectiveIP = vpnIP
+	}
+
+	// Always derive tableID from effectiveIP (preferring VPN IP 10.50.0.x if available)
+	tableID, err := s.calculateTableID(effectiveIP)
 	if err != nil {
 		return "", err
 	}
 
-	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
-
-	_ = exec.Command("ip", "rule", "del", "from", technicianIP, "lookup", tableID).Run()
-	if vpnIP != "" && vpnIP != technicianIP {
-		_ = exec.Command("ip", "rule", "del", "from", vpnIP, "lookup", tableID).Run()
-	}
+	// Clean up any existing technician rules for technicianIP and vpnIP
+	s.cleanupTechnicianIPRules(technicianIP, vpnIP)
 	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
 
-	effectiveIP := technicianIP
-	if vpnIP != "" {
-		effectiveIP = vpnIP
+	// Flush active conntrack entries for technician IPs to prevent TCP session sticking
+	s.flushConntrackForIP(technicianIP)
+	if vpnIP != "" && vpnIP != technicianIP {
+		s.flushConntrackForIP(vpnIP)
 	}
 
 	if id == uuid.Nil {
@@ -63,12 +68,12 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 		return "", fmt.Errorf("get tunnel: %w", err)
 	}
 
-	if err := exec.Command("ip", "rule", "add", "from", technicianIP, "lookup", tableID).Run(); err != nil {
+	if err := exec.Command("ip", "rule", "add", "from", effectiveIP, "lookup", tableID).Run(); err != nil {
 		return "", fmt.Errorf("add ip rule: %w", err)
 	}
 	if vpnIP != "" && vpnIP != technicianIP {
-		if err := exec.Command("ip", "rule", "add", "from", vpnIP, "lookup", tableID).Run(); err != nil {
-			s.log.Warn("Failed to add ip rule for vpn IP", zap.String("vpn_ip", vpnIP), zap.Error(err))
+		if err := exec.Command("ip", "rule", "add", "from", technicianIP, "lookup", tableID).Run(); err != nil {
+			s.log.Warn("Failed to add ip rule for technician public IP", zap.String("public_ip", technicianIP), zap.Error(err))
 		}
 	}
 
@@ -89,7 +94,7 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
 
-	for _, subnet := range []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"} {
+	for _, subnet := range effectiveSubnets(t.MonitoringSubnets) {
 		if err := exec.Command("ip", "route", "add", subnet, "via", nsIPNoMask, "dev", vethHost, "table", tableID).Run(); err != nil {
 			s.log.Warn("Failed to add route to technician table", zap.String("subnet", subnet), zap.Error(err))
 		}
@@ -98,6 +103,42 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	s.log.Info("Technician selected reseller tunnel",
 		zap.String("technician_ip", technicianIP), zap.String("vpn_ip", vpnIP), zap.String("tunnel", t.Name), zap.String("table", tableID))
 	return effectiveIP, nil
+}
+
+func (s *TunnelService) cleanupTechnicianIPRules(ips ...string) {
+	out, err := exec.Command("ip", "rule", "show").Output()
+	if err != nil {
+		return
+	}
+	targetIPs := make(map[string]bool)
+	for _, ip := range ips {
+		trimmed := strings.TrimSpace(ip)
+		if trimmed != "" {
+			targetIPs[trimmed] = true
+		}
+	}
+	if len(targetIPs) == 0 {
+		return
+	}
+
+	for _, line := range netSplitLines(string(out)) {
+		if isTechnicianTableRule(line) {
+			fromIP, tableID := extractRuleFields(line)
+			if targetIPs[fromIP] {
+				_ = exec.Command("ip", "rule", "del", "from", fromIP, "lookup", tableID).Run()
+				_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+			}
+		}
+	}
+}
+
+func (s *TunnelService) flushConntrackForIP(ipStr string) {
+	ipStr = strings.TrimSpace(ipStr)
+	if ipStr == "" {
+		return
+	}
+	_ = exec.Command("conntrack", "-D", "-s", ipStr).Run()
+	_ = exec.Command("conntrack", "-D", "-d", ipStr).Run()
 }
 
 func (s *TunnelService) flushStaleTechnicianRules() {
