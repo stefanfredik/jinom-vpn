@@ -84,15 +84,15 @@ func (s *TunnelService) ListNOCTechnicians(ctx context.Context) ([]NOCUser, erro
 			if len(fields) >= 8 {
 				pubKey := fields[0]
 				handshake, _ := strconv.ParseInt(fields[4], 10, 64)
-				tx, _ := strconv.ParseInt(fields[5], 10, 64)
-				rx, _ := strconv.ParseInt(fields[6], 10, 64)
+				rx, _ := strconv.ParseInt(fields[5], 10, 64)
+				tx, _ := strconv.ParseInt(fields[6], 10, 64)
 				status := "offline"
 				if handshake > 0 && time.Now().Unix()-handshake < 180 {
 					status = "online"
 				}
 				activePeers[pubKey] = NOCUser{
 					PublicKey: pubKey, LatestHandshake: handshake,
-					TransferTx: tx, TransferRx: rx, Status: status,
+					TransferRx: rx, TransferTx: tx, Status: status,
 				}
 			}
 		}

@@ -30,13 +30,13 @@ func (s *TunnelService) calculateTableID(ipStr string) (string, error) {
 	return fmt.Sprintf("%d", 10000+offset), nil
 }
 
-func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP string, id uuid.UUID) error {
+func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP string, id uuid.UUID) (string, error) {
 	s.nocMu.Lock()
 	defer s.nocMu.Unlock()
 
 	tableID, err := s.calculateTableID(technicianIP)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
@@ -47,22 +47,29 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	}
 	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
 
+	effectiveIP := technicianIP
+	if vpnIP != "" {
+		effectiveIP = vpnIP
+	}
+
 	if id == uuid.Nil {
 		s.log.Info("Technician cleared reseller tunnel routing",
 			zap.String("technician_ip", technicianIP), zap.String("vpn_ip", vpnIP))
-		return nil
+		return effectiveIP, nil
 	}
 
 	t, err := s.repo.FindByID(ctx, id)
 	if err != nil {
-		return fmt.Errorf("get tunnel: %w", err)
+		return "", fmt.Errorf("get tunnel: %w", err)
 	}
 
 	if err := exec.Command("ip", "rule", "add", "from", technicianIP, "lookup", tableID).Run(); err != nil {
-		return fmt.Errorf("add ip rule: %w", err)
+		return "", fmt.Errorf("add ip rule: %w", err)
 	}
 	if vpnIP != "" && vpnIP != technicianIP {
-		_ = exec.Command("ip", "rule", "add", "from", vpnIP, "lookup", tableID).Run()
+		if err := exec.Command("ip", "rule", "add", "from", vpnIP, "lookup", tableID).Run(); err != nil {
+			s.log.Warn("Failed to add ip rule for vpn IP", zap.String("vpn_ip", vpnIP), zap.Error(err))
+		}
 	}
 
 	if addrs, err := net.InterfaceAddrs(); err == nil {
@@ -89,8 +96,8 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	}
 
 	s.log.Info("Technician selected reseller tunnel",
-		zap.String("technician_ip", technicianIP), zap.String("tunnel", t.Name), zap.String("table", tableID))
-	return nil
+		zap.String("technician_ip", technicianIP), zap.String("vpn_ip", vpnIP), zap.String("tunnel", t.Name), zap.String("table", tableID))
+	return effectiveIP, nil
 }
 
 func (s *TunnelService) flushStaleTechnicianRules() {
@@ -100,7 +107,7 @@ func (s *TunnelService) flushStaleTechnicianRules() {
 		return
 	}
 	for _, line := range netSplitLines(string(out)) {
-		if containsLookup(line) {
+		if isTechnicianTableRule(line) {
 			fromIP, tableID := extractRuleFields(line)
 			if fromIP != "" && tableID != "" {
 				_ = exec.Command("ip", "rule", "del", "from", fromIP, "lookup", tableID).Run()

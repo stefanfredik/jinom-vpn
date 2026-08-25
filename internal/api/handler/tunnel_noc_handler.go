@@ -22,14 +22,15 @@ func (h *TunnelHandler) SelectNOCReseller(c *fiber.Ctx) error {
 		req.TechnicianIP = c.IP()
 	}
 
-	if err := h.svc.SelectNOCReseller(c.Context(), req.TechnicianIP, id); err != nil {
+	mappedIP, err := h.svc.SelectNOCReseller(c.Context(), req.TechnicianIP, id)
+	if err != nil {
 		return internalError(c, err)
 	}
 
 	return c.JSON(fiber.Map{
 		"success":   true,
 		"message":   "NOC routing configured successfully",
-		"mapped_ip": req.TechnicianIP,
+		"mapped_ip": mappedIP,
 	})
 }
 

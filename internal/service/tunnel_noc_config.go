@@ -104,13 +104,21 @@ func (s *TunnelService) findVPNIPByEndpointIP(endpointIP string) string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return parseVPNIPFromDump(string(out), endpointIP)
+}
+
+func parseVPNIPFromDump(dumpOutput, endpointIP string) string {
+	endpointIP = strings.TrimSpace(endpointIP)
+	if endpointIP == "" {
+		return ""
+	}
+	for _, line := range strings.Split(dumpOutput, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 5 {
+		if len(fields) < 4 {
 			continue
 		}
-		allowedIPs := fields[4]
 		endpoint := fields[2]
+		allowedIPs := fields[3]
 		if endpoint == "(none)" || endpoint == "" {
 			continue
 		}
@@ -132,8 +140,20 @@ func netSplitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
+func isTechnicianTableRule(line string) bool {
+	fromIP, tableID := extractRuleFields(line)
+	if fromIP == "" || tableID == "" {
+		return false
+	}
+	tid, err := strconv.Atoi(tableID)
+	if err != nil {
+		return false
+	}
+	return tid >= 10000 && tid <= 59999
+}
+
 func containsLookup(line string) bool {
-	return strings.Contains(line, "lookup 10")
+	return isTechnicianTableRule(line)
 }
 
 func extractRuleFields(line string) (fromIP, tableID string) {
