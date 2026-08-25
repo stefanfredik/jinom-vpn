@@ -17,6 +17,8 @@ func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	app.Get("/health", deps.HealthHandler.Health)
 
 	api := app.Group("/api/v1", middleware.APIKeyAuth(deps.APIKey))
+	api.Post("/noc/status", deps.TunnelHandler.GetNOCStatus)
+	api.Get("/noc/status", deps.TunnelHandler.GetNOCStatus)
 	api.Post("/noc/users", deps.TunnelHandler.CreateNOCTechnician)
 	api.Get("/noc/users", deps.TunnelHandler.ListNOCTechnicians)
 	api.Delete("/noc/users", deps.TunnelHandler.DeleteNOCTechnician)

@@ -12,6 +12,7 @@ type Repository interface {
 	FindAll(ctx context.Context, filter Filter) ([]ResellerTunnel, int64, error)
 	FindByResellerID(ctx context.Context, resellerID int64) (*ResellerTunnel, error)
 	FindByNamespace(ctx context.Context, namespace string) (*ResellerTunnel, error)
+	FindByTunnelIndex(ctx context.Context, index int) (*ResellerTunnel, error)
 	FindActive(ctx context.Context) ([]ResellerTunnel, error)
 	// FindActiveOrDown returns tunnels in 'active' OR 'down' state for health monitoring.
 	FindActiveOrDown(ctx context.Context) ([]ResellerTunnel, error)

@@ -112,6 +112,18 @@ func (r *TunnelRepository) FindByNamespace(ctx context.Context, namespace string
 	return r.mapToDomain(&rec), nil
 }
 
+func (r *TunnelRepository) FindByTunnelIndex(ctx context.Context, index int) (*tunnel.ResellerTunnel, error) {
+	var rec tunnelRecord
+	err := r.db.DB.GetContext(ctx, &rec, `SELECT * FROM reseller_tunnels WHERE tunnel_index = $1 LIMIT 1`, index)
+	if err == sql.ErrNoRows {
+		return nil, tunnel.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find tunnel by index: %w", err)
+	}
+	return r.mapToDomain(&rec), nil
+}
+
 func (r *TunnelRepository) FindActive(ctx context.Context) ([]tunnel.ResellerTunnel, error) {
 	var records []tunnelRecord
 	err := r.db.DB.SelectContext(ctx, &records,

@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,47 @@ type TunnelStatus struct {
 	ActiveSubnets     []string      `json:"active_subnets"`
 }
 
+func (s *TunnelService) CheckPeerConnection(t *tunnel.ResellerTunnel) bool {
+	if !t.IsActive() || !s.nsSvc.Exists(t.Namespace) {
+		return false
+	}
+
+	// 1. Try ICMP ping inside namespace
+	peerIP := extractIP(t.ClientIPAddress)
+	if peerIP != "" {
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "1", "-W", "1", peerIP); err == nil {
+			return true
+		}
+	}
+
+	// 2. Protocol-specific checks
+	if t.VPNType == tunnel.VPNTypeWireGuard {
+		ifName := fmt.Sprintf("wg-%s", t.Namespace)
+		if hsOut, err := s.nsSvc.ExecInNS(t.Namespace, "wg", "show", ifName, "latest-handshakes"); err == nil {
+			parts := strings.Fields(string(hsOut))
+			if len(parts) >= 2 {
+				if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil && ts > 0 {
+					if time.Since(time.Unix(ts, 0)) <= 3*time.Minute {
+						return true
+					}
+				}
+			}
+		}
+	} else if t.VPNType == tunnel.VPNTypeL2TP {
+		if out, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "-br", "link", "show"); err == nil {
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && strings.HasPrefix(fields[0], "ppp") && fields[1] == "UP" {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelStatus, error) {
 	t, err := s.repo.FindByID(ctx, id)
 	if err != nil {
@@ -43,9 +86,7 @@ func (s *TunnelService) GetStatus(ctx context.Context, id uuid.UUID) (*TunnelSta
 	status.ConfiguredSubnets = effectiveSubnets(t.MonitoringSubnets)
 
 	if t.IsActive() && s.nsSvc.Exists(t.Namespace) {
-		peerIP := extractIP(t.ClientIPAddress)
-		_, pingErr := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "1", "-W", "2", peerIP)
-		status.PeerReachable = pingErr == nil
+		status.PeerReachable = s.CheckPeerConnection(t)
 		status.ActiveSubnets = s.activeRoutes(t)
 	}
 

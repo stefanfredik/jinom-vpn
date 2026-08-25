@@ -40,6 +40,7 @@ type TunnelResponse struct {
 	MonitoringSubnets []string  `json:"monitoring_subnets"`
 	Status            string    `json:"status"`
 	LastError         string    `json:"last_error,omitempty"`
+	PeerReachable     bool      `json:"peer_reachable"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -85,6 +86,7 @@ func ToTunnelResponse(t *tunnel.ResellerTunnel) TunnelResponse {
 		MonitoringSubnets: t.MonitoringSubnets,
 		Status:            string(t.Status),
 		LastError:         t.LastError,
+		PeerReachable:     t.IsActive(),
 		CreatedAt:         t.CreatedAt,
 		UpdatedAt:         t.UpdatedAt,
 	}

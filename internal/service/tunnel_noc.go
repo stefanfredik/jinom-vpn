@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -21,7 +22,80 @@ type NOCUser struct {
 	Status          string `json:"status"`
 }
 
+type NOCStatus struct {
+	TechnicianIP      string `json:"technician_ip"`
+	MappedIP          string `json:"mapped_ip"`
+	IsConnected       bool   `json:"is_connected"`
+	ActiveTunnelID    string `json:"active_tunnel_id,omitempty"`
+	ActiveTunnelName  string `json:"active_tunnel_name,omitempty"`
+	ActiveTunnelIndex int    `json:"active_tunnel_index,omitempty"`
+}
+
+func cleanIP(ipStr string) string {
+	ipStr = strings.TrimSpace(ipStr)
+	if strings.Contains(ipStr, ",") {
+		ipStr = strings.TrimSpace(strings.Split(ipStr, ",")[0])
+	}
+	if host, _, err := net.SplitHostPort(ipStr); err == nil {
+		ipStr = host
+	}
+	return strings.TrimSpace(ipStr)
+}
+
+func (s *TunnelService) GetNOCStatus(ctx context.Context, technicianIP string) (*NOCStatus, error) {
+	s.nocMu.Lock()
+	defer s.nocMu.Unlock()
+
+	technicianIP = cleanIP(technicianIP)
+	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
+	effectiveIP := technicianIP
+	if vpnIP != "" {
+		effectiveIP = vpnIP
+	}
+
+	status := &NOCStatus{
+		TechnicianIP: technicianIP,
+		MappedIP:     effectiveIP,
+		IsConnected:  strings.HasPrefix(effectiveIP, "10.50."),
+	}
+
+	tableID, err := s.calculateTableID(effectiveIP)
+	if err != nil {
+		return status, nil
+	}
+
+	out, err := exec.Command("ip", "route", "show", "table", tableID).Output()
+	if err == nil && len(out) > 0 {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			for i, field := range fields {
+				if field == "dev" && i+1 < len(fields) {
+					devName := fields[i+1]
+					if strings.HasPrefix(devName, "vh-") {
+						idxStr := strings.TrimPrefix(devName, "vh-")
+						var idx int
+						if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx > 0 {
+							status.ActiveTunnelIndex = idx
+							if t, err := s.repo.FindByTunnelIndex(ctx, idx); err == nil && t != nil {
+								status.ActiveTunnelID = t.ID.String()
+								status.ActiveTunnelName = t.Name
+							}
+							break
+						}
+					}
+				}
+			}
+			if status.ActiveTunnelID != "" {
+				break
+			}
+		}
+	}
+
+	return status, nil
+}
+
 func (s *TunnelService) calculateTableID(ipStr string) (string, error) {
+	ipStr = cleanIP(ipStr)
 	ip := net.ParseIP(ipStr).To4()
 	if ip == nil {
 		return "", fmt.Errorf("invalid IPv4 address: %s", ipStr)
@@ -35,6 +109,7 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	s.nocMu.Lock()
 	defer s.nocMu.Unlock()
 
+	technicianIP = cleanIP(technicianIP)
 	vpnIP := s.findVPNIPByEndpointIP(technicianIP)
 	effectiveIP := technicianIP
 	if vpnIP != "" {
@@ -48,8 +123,7 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	}
 
 	// Clean up any existing technician rules for technicianIP and vpnIP
-	s.cleanupTechnicianIPRules(technicianIP, vpnIP)
-	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+	s.cleanupTechnicianIPRules(tableID, technicianIP, vpnIP)
 
 	// Flush active conntrack entries for technician IPs to prevent TCP session sticking
 	s.flushConntrackForIP(technicianIP)
@@ -105,40 +179,48 @@ func (s *TunnelService) SelectNOCReseller(ctx context.Context, technicianIP stri
 	return effectiveIP, nil
 }
 
-func (s *TunnelService) cleanupTechnicianIPRules(ips ...string) {
-	out, err := exec.Command("ip", "rule", "show").Output()
-	if err != nil {
-		return
-	}
+func (s *TunnelService) cleanupTechnicianIPRules(tableID string, ips ...string) {
 	targetIPs := make(map[string]bool)
 	for _, ip := range ips {
-		trimmed := strings.TrimSpace(ip)
+		trimmed := cleanIP(ip)
 		if trimmed != "" {
 			targetIPs[trimmed] = true
 		}
 	}
-	if len(targetIPs) == 0 {
+
+	if tableID != "" {
+		_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+	}
+
+	out, err := exec.Command("ip", "rule", "show").Output()
+	if err != nil {
 		return
 	}
 
 	for _, line := range netSplitLines(string(out)) {
 		if isTechnicianTableRule(line) {
-			fromIP, tableID := extractRuleFields(line)
-			if targetIPs[fromIP] {
-				_ = exec.Command("ip", "rule", "del", "from", fromIP, "lookup", tableID).Run()
-				_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
+			fromIP, tid := extractRuleFields(line)
+			if targetIPs[fromIP] || (tableID != "" && tid == tableID) {
+				for i := 0; i < 5; i++ {
+					if err := exec.Command("ip", "rule", "del", "from", fromIP, "lookup", tid).Run(); err != nil {
+						break
+					}
+				}
+				_ = exec.Command("ip", "route", "flush", "table", tid).Run()
 			}
 		}
 	}
 }
 
 func (s *TunnelService) flushConntrackForIP(ipStr string) {
-	ipStr = strings.TrimSpace(ipStr)
+	ipStr = cleanIP(ipStr)
 	if ipStr == "" {
 		return
 	}
-	_ = exec.Command("conntrack", "-D", "-s", ipStr).Run()
-	_ = exec.Command("conntrack", "-D", "-d", ipStr).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "conntrack", "-D", "-s", ipStr).Run()
+	_ = exec.CommandContext(ctx, "conntrack", "-D", "-d", ipStr).Run()
 }
 
 func (s *TunnelService) flushStaleTechnicianRules() {
