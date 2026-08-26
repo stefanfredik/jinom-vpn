@@ -21,31 +21,36 @@ func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.Rese
 		return
 	}
 
-	s.mu.Lock()
-	canRecover := st.recoveryCount < s.maxRecoveries &&
-		time.Since(st.lastRecovery) > 5*time.Minute
-	if canRecover {
-		st.recoveryCount++
-		st.lastRecovery = time.Now()
-		st.failCount = 0
-	}
-	s.mu.Unlock()
+	// For L2TP tunnels, do NOT perform destructive auto-recovery (teardown / pkill pppd).
+	// L2TP PPP sessions are managed dynamically by the PPP daemon and killing pppd causes flapping loops.
+	if t.VPNType != tunnel.VPNTypeL2TP {
+		s.mu.Lock()
+		canRecover := st.recoveryCount < s.maxRecoveries &&
+			time.Since(st.lastRecovery) > 5*time.Minute
+		if canRecover {
+			st.recoveryCount++
+			st.lastRecovery = time.Now()
+			st.failCount = 0
+		}
+		s.mu.Unlock()
 
-	if canRecover {
-		s.log.Warn("Tunnel unhealthy, attempting recovery",
-			zap.String("tunnel_id", t.ID.String()),
-			zap.String("namespace", t.Namespace),
-			zap.String("reason", reason),
-			zap.Int("consecutive_failures", count),
-		)
-		s.attemptRecovery(ctx, t)
-		return
+		if canRecover {
+			s.log.Warn("Tunnel unhealthy, attempting recovery",
+				zap.String("tunnel_id", t.ID.String()),
+				zap.String("namespace", t.Namespace),
+				zap.String("reason", reason),
+				zap.Int("consecutive_failures", count),
+			)
+			s.attemptRecovery(ctx, t)
+			return
+		}
 	}
 
 	if t.Status != tunnel.StatusDown {
-		s.log.Warn("Tunnel marked as down (recovery unavailable)",
+		s.log.Warn("Tunnel marked as down",
 			zap.String("tunnel_id", t.ID.String()),
 			zap.String("namespace", t.Namespace),
+			zap.String("vpn_type", string(t.VPNType)),
 			zap.String("reason", reason),
 		)
 		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusDown, reason)
@@ -73,8 +78,8 @@ func (s *HealthMonitorService) attemptRecovery(ctx context.Context, t *tunnel.Re
 			_ = s.wgSvc.Teardown(t)
 			err = s.wgSvc.Setup(t)
 		case tunnel.VPNTypeL2TP:
-			_ = s.l2tpSvc.Teardown(t)
-			err = s.l2tpSvc.Setup(t)
+			// L2TP tunnels are client-initiated; do not teardown/pkill active pppd during automated recovery
+			err = nil
 		}
 	}
 

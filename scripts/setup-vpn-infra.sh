@@ -188,8 +188,8 @@ hide-password
 debug
 name jinom-vpn
 proxyarp
-lcp-echo-interval 15
-lcp-echo-failure 4
+lcp-echo-interval 30
+lcp-echo-failure 8
 mtu 1400
 mru 1400
 EOF

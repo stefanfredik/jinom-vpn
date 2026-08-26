@@ -29,9 +29,9 @@ func (s *L2TPService) initGlobalDaemons() {
 conn %%default
     keyingtries=3
     ikelifetime=28800s
-    lifetime=3600s
-    dpddelay=15s
-    dpdtimeout=45s
+    lifetime=28800s
+    dpddelay=30s
+    dpdtimeout=120s
     dpdaction=clear
     ike=aes256-sha256-modp2048,aes128-sha256-modp2048,aes128-sha1-modp1024,aes128-md5-modp1024,3des-sha1-modp2048!
     esp=aes256-sha256,aes256-sha1,aes128-sha1,aes128-sha1-modp1024,3des-sha1!
@@ -105,8 +105,8 @@ hide-password
 debug
 name jinom-vpn
 proxyarp
-lcp-echo-interval 15
-lcp-echo-failure 4
+lcp-echo-interval 30
+lcp-echo-failure 8
 mtu 1400
 mru 1400
 `

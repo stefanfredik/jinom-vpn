@@ -41,7 +41,7 @@ func (s *HealthMonitorService) checkTunnel(ctx context.Context, t *tunnel.Resell
 	}
 
 	peerIP := extractIP(t.ClientIPAddress)
-	out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "2", "-W", "3", peerIP)
+	out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "3", "-W", "2", peerIP)
 
 	if err != nil {
 		loss := 100.0
