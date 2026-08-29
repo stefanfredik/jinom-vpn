@@ -150,7 +150,7 @@ func (s *WireGuardService) generateConfig(t *tunnel.ResellerTunnel) string {
 	if t.ClientPublicKey == "" {
 		return iface
 	}
-	return iface + fmt.Sprintf("\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n", t.ClientPublicKey, peerAllowedIPs(t))
+	return iface + fmt.Sprintf("\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\nPersistentKeepalive = 25\n", t.ClientPublicKey, peerAllowedIPs(t))
 }
 
 func peerAllowedIPs(t *tunnel.ResellerTunnel) string {
@@ -177,7 +177,7 @@ func (s *WireGuardService) AttachPeer(t *tunnel.ResellerTunnel) error {
 	allowedIPs := strings.ReplaceAll(peerAllowedIPs(t), " ", "")
 
 	if _, err := s.nsSvc.ExecInNS(ns, "wg", "set", ifName,
-		"peer", t.ClientPublicKey, "allowed-ips", allowedIPs); err != nil {
+		"peer", t.ClientPublicKey, "allowed-ips", allowedIPs, "persistent-keepalive", "25"); err != nil {
 		return fmt.Errorf("attach wg peer: %w", err)
 	}
 
