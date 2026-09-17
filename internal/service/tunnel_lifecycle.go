@@ -161,6 +161,8 @@ func (s *TunnelService) Delete(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("delete tunnel row: %w", err)
 	}
 
+	s.forgetRouterStatus(id)
+
 	if s.onDelete != nil {
 		s.onDelete(id.String())
 	}

@@ -35,13 +35,17 @@ func (s *HealthMonitorService) checkTunnel(ctx context.Context, t *tunnel.Resell
 	}
 
 	if t.VPNType == tunnel.VPNTypeL2TP {
-		if handled := s.checkL2TPViaIPSec(ctx, t, metric); handled {
+		if handled := s.checkL2TP(ctx, t, metric); handled {
 			return
 		}
 	}
 
 	peerIP := extractIP(t.ClientIPAddress)
-	out, err := s.nsSvc.ExecInNS(t.Namespace, "ping", "-c", "3", "-W", "2", peerIP)
+	// "-i 0.3" memangkas jeda antar-paket dari satu detik menjadi 300 ms:
+	// tiga sampel tetap didapat, tapi probe selesai jauh lebih cepat. Batas
+	// waktu eksplisit mencegah satu ping yang menggantung mengunci worker.
+	out, err := s.nsSvc.ExecInNSTimeout(pingCmdTimeout, t.Namespace,
+		"ping", "-c", "3", "-W", "2", "-i", "0.3", peerIP)
 
 	if err != nil {
 		loss := 100.0
@@ -125,6 +129,47 @@ func (s *HealthMonitorService) checkWireGuard(ctx context.Context, t *tunnel.Res
 	s.handleSuccess(ctx, t)
 }
 
-func (s *HealthMonitorService) checkL2TPViaIPSec(_ context.Context, _ *tunnel.ResellerTunnel, _ *tunnel.TunnelMetric) bool {
+// checkL2TP menangani sinyal L2TP yang murah sebelum jatuh ke ping.
+//
+// Mengembalikan true bila nasib tunnel sudah diputuskan di sini.
+//
+// Sebelumnya fungsi ini selalu mengembalikan false — kode mati yang membuat
+// kesehatan L2TP sepenuhnya bergantung pada satu ping ICMP. Ketiadaan sesi PPP
+// adalah kegagalan yang pasti dan bisa diketahui dalam hitungan milidetik;
+// tidak ada gunanya membayar beberapa detik ping untuk mengonfirmasinya.
+func (s *HealthMonitorService) checkL2TP(ctx context.Context, t *tunnel.ResellerTunnel, metric *tunnel.TunnelMetric) bool {
+	if s.l2tpSvc == nil {
+		return false
+	}
+
+	ifName := s.l2tpSvc.findPPPInterface(t.Namespace)
+	if ifName == "" {
+		loss := 100.0
+		metric.PacketLoss = &loss
+		_ = s.repo.SaveMetric(ctx, metric)
+		s.handleFailure(ctx, t, "no active ppp session")
+		return true
+	}
+
+	if rx, ok := s.readIfCounter(t.Namespace, ifName, "rx_bytes"); ok {
+		metric.RxBytes = &rx
+	}
+	if tx, ok := s.readIfCounter(t.Namespace, ifName, "tx_bytes"); ok {
+		metric.TxBytes = &tx
+	}
+
 	return false
+}
+
+func (s *HealthMonitorService) readIfCounter(ns, ifName, counter string) (int64, bool) {
+	path := fmt.Sprintf("/sys/class/net/%s/statistics/%s", ifName, counter)
+	out, err := s.nsSvc.ExecInNS(ns, "cat", path)
+	if err != nil {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }

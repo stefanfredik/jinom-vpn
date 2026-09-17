@@ -63,9 +63,22 @@ func main() {
 
 	tunnelRepo := postgres.NewTunnelRepository(db, cryptoSvc, zapLogger)
 
+	// VPS_PUBLIC_IP harus sudah final SEBELUM L2TPService dibangun: konstruktornya
+	// menulis /etc/ipsec.conf, dan "left=" kosong menghasilkan conn yang gagal
+	// dimuat charon — yaitu seluruh L2TP mati. Sebelumnya nilai mentah cfg
+	// dipakai di sini sementara fallback baru diterapkan beberapa baris di bawah.
+	vpsPublicIP := cfg.VPSPublicIP
+	if vpsPublicIP == "" {
+		zapLogger.Warn("⚠️  VPS_PUBLIC_IP not configured in .env file! MikroTik provisioning will FAIL if attempted.")
+		zapLogger.Warn("Update .env file: VPS_PUBLIC_IP=<your-public-ip>")
+		vpsPublicIP = "0.0.0.0" // Will be validated at provision time
+	} else {
+		zapLogger.Info("VPS_PUBLIC_IP configured", zap.String("ip", vpsPublicIP))
+	}
+
 	nsSvc := service.NewNamespaceService(zapLogger)
 	wgSvc := service.NewWireGuardService(nsSvc, zapLogger)
-	l2tpSvc := service.NewL2TPService(nsSvc, cfg.VPSPublicIP, zapLogger)
+	l2tpSvc := service.NewL2TPService(nsSvc, vpsPublicIP, cfg.L2TPSNATMode, zapLogger)
 	provisionerSvc := service.NewProvisionerService(zapLogger)
 
 	// Synchronize global L2TP IPSec PSK to all tunnels in database
@@ -77,13 +90,18 @@ func main() {
 		}
 	}
 
-	vpsPublicIP := cfg.VPSPublicIP
-	if vpsPublicIP == "" {
-		zapLogger.Warn("⚠️  VPS_PUBLIC_IP not configured in .env file! MikroTik provisioning will FAIL if attempted.")
-		zapLogger.Warn("Update .env file: VPS_PUBLIC_IP=<your-public-ip>")
-		vpsPublicIP = "0.0.0.0" // Will be validated at provision time
+	// Pemeliharaan sekali jalan sebelum Reconcile:
+	//   - menyusun ulang chap-secrets dari database, memulihkan entri yang
+	//     terhapus oleh pencocokan namespace berawalan;
+	//   - menyapu sisa rule DNAT/SNAT dari desain per-namespace lama, yang
+	//     sebelumnya diulang pada setiap Setup dan Teardown.
+	if tunnels, err := tunnelRepo.FindActiveOrDown(context.Background()); err != nil {
+		zapLogger.Warn("Startup maintenance skipped: failed to list tunnels", zap.Error(err))
 	} else {
-		zapLogger.Info("VPS_PUBLIC_IP configured", zap.String("ip", vpsPublicIP))
+		if err := l2tpSvc.RebuildChapSecrets(tunnels); err != nil {
+			zapLogger.Error("Failed to rebuild chap-secrets", zap.Error(err))
+		}
+		l2tpSvc.PurgeLegacyRouting(tunnels)
 	}
 
 	tunnelSvc := service.NewTunnelService(

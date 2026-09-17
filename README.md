@@ -12,6 +12,7 @@ VPN tunnel management service for Jinom NMS multi-reseller isolation. Manages Wi
 - [Configuration](#configuration)
 - [Development Setup](#development-setup)
 - [Production Deployment](#production-deployment)
+- [L2TP Source NAT](#l2tp-source-nat)
 - [API Reference](#api-reference)
 - [Tunnel Lifecycle](#tunnel-lifecycle)
 - [Health Monitoring](#health-monitoring)
@@ -353,6 +354,37 @@ cp .env.example .env
 | Variable | Default | Deskripsi |
 |----------|---------|-----------|
 | `VPS_PUBLIC_IP` | `0.0.0.0` | Public IP VPS ini. Digunakan saat provision MikroTik sebagai endpoint tunnel |
+| `L2TP_SNAT_MODE` | `snat` | Alamat sumber trafik monitoring L2TP. Lihat [L2TP Source NAT](#l2tp-source-nat) |
+
+### L2TP Source NAT
+
+Trafik monitoring yang masuk ke namespace di-NAT sebelum keluar lewat interface
+`ppp`. Alamat sumber yang dipilih menentukan apakah rule di sisi MikroTik cocok
+atau tidak.
+
+| Mode | Alamat sumber | Akibat |
+|------|---------------|--------|
+| `snat` *(default)* | `ServerIPAddress` tunnel, mis. `10.250.0.1` | Cocok dengan rule `10.250.0.0/16` yang sudah di-provision di router: filter ICMP, NAT masquerade, dan route `jinom-nms` |
+| `masquerade` | Alamat lokal ppp, `10.255.255.1` untuk **semua** reseller | Perilaku lama. Ketiga rule di atas tidak pernah cocok dengan paket apa pun |
+
+Dalam mode `masquerade`, ping health monitor ditolak oleh router yang input
+chain-nya diperketat, dan balasan dari perangkat LAN hanya sampai bila MikroTik
+kebetulan menjadi default gateway perangkat tersebut — sumber ketidakstabilan
+yang terlihat acak antar reseller.
+
+Mode `snat` membuat ketiga objek router itu menjadi penentu. Objek tersebut dulu
+dibuat dengan error yang diabaikan, jadi sebagian router mungkin tidak
+memilikinya. **Periksa dulu sebelum deploy** dengan endpoint verifikasi
+read-only:
+
+```bash
+curl -H "X-API-Key: $API_KEY" http://localhost:8090/api/v1/tunnels/<id>/verify
+```
+
+Endpoint itu hanya menjalankan `/print` dan tidak pernah menyentuh interface
+`l2tp-jinom`, jadi aman terhadap tunnel produksi yang sedang melayani trafik.
+Bila ada router yang belum lengkap, `L2TP_SNAT_MODE=masquerade` mengembalikan
+perilaku lama tanpa perlu deploy ulang.
 
 ### Generate MASTER_KEY
 
@@ -930,6 +962,36 @@ GET /api/v1/tunnels/{id}
 Response: HTTP 200 atau 404.
 
 ---
+
+### Verify Router (read-only)
+
+```
+GET /api/v1/tunnels/{id}/verify
+```
+
+Memeriksa objek MikroTik yang dibutuhkan tunnel L2TP tanpa mengubah apa pun.
+Berbeda dengan `POST /provision`, yang melakukan disable + remove + add pada
+interface `l2tp-jinom` dan karenanya memutus sesi setiap kali dipanggil.
+
+```json
+{
+  "success": true,
+  "data": {
+    "tunnel_id": "…",
+    "reachable": true,
+    "ok": false,
+    "checks": [
+      { "name": "api-reachable", "ok": true },
+      { "name": "interface-l2tp-jinom", "ok": true, "detail": "running=true" },
+      { "name": "route-10.250.0.0/16", "ok": false,
+        "detail": "missing — required so replies to the monitoring source address return through the tunnel" },
+      { "name": "nat-masquerade-10.250.0.0/16", "ok": true },
+      { "name": "filter-ipsec-ports", "ok": true },
+      { "name": "filter-icmp-10.250.0.0/16", "ok": true }
+    ]
+  }
+}
+```
 
 ### Get Tunnel Status
 

@@ -3,60 +3,144 @@ package service
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 
 	"github.com/jinom/vpn/internal/domain/tunnel"
 )
 
+// SNAT mode menentukan bagaimana trafik NMS keluar melalui interface ppp.
+const (
+	// SNATModeServerIP mem-SNAT trafik ke ServerIPAddress tunnel (10.250.x.1),
+	// sehingga sumber paket masuk ke rentang 10.250.0.0/16 yang sudah menjadi
+	// acuan rule filter, NAT, dan route di sisi MikroTik.
+	SNATModeServerIP = "snat"
+	// SNATModeMasquerade mempertahankan perilaku lama: sumber paket menjadi
+	// alamat lokal ppp (10.255.255.1 untuk semua reseller). Disediakan sebagai
+	// jalan mundur operasional tanpa perlu deploy ulang.
+	SNATModeMasquerade = "masquerade"
+)
+
+const (
+	pppDir        = "/etc/ppp"
+	pskPath       = "/etc/ipsec.d/jinom-psk"
+	ipsecConfPath = "/etc/ipsec.conf"
+	ipsecSecPath  = "/etc/ipsec.secrets"
+)
+
+// chapSecrets adalah var, bukan const, semata agar tes dapat mengarahkannya ke
+// direktori sementara. Produksi tidak pernah mengubahnya.
+var chapSecrets = "/etc/ppp/chap-secrets"
+
 type L2TPService struct {
 	nsSvc       *NamespaceService
 	log         *zap.Logger
 	vpsPublicIP string
-	psk         string
+	snatMode    string
+
+	pskMu sync.RWMutex
+	psk   string
+
+	// secretsMu menjaga operasi baca-ubah-tulis pada /etc/ppp/chap-secrets.
+	// Jalur pemanggil memang diserialisasi oleh TunnelService.setupMu, tetapi
+	// file ini juga ditulis oleh RebuildChapSecrets di luar jalur tersebut.
+	secretsMu sync.Mutex
 }
 
-func NewL2TPService(nsSvc *NamespaceService, vpsPublicIP string, log *zap.Logger) *L2TPService {
-	svc := &L2TPService{nsSvc: nsSvc, vpsPublicIP: vpsPublicIP, log: log}
+func NewL2TPService(nsSvc *NamespaceService, vpsPublicIP, snatMode string, log *zap.Logger) *L2TPService {
+	if snatMode != SNATModeMasquerade {
+		snatMode = SNATModeServerIP
+	}
+	svc := &L2TPService{
+		nsSvc:       nsSvc,
+		vpsPublicIP: vpsPublicIP,
+		snatMode:    snatMode,
+		log:         log,
+	}
 	svc.initGlobalDaemons()
-	svc.installIPUpScript()
+	svc.installPPPHooks()
 	return svc
 }
 
 // GetPSK returns the active global IPSec Pre-Shared Key.
 func (s *L2TPService) GetPSK() string {
+	s.pskMu.RLock()
+	psk := s.psk
+	s.pskMu.RUnlock()
+	if psk != "" {
+		return psk
+	}
+
+	s.pskMu.Lock()
+	defer s.pskMu.Unlock()
 	if s.psk != "" {
 		return s.psk
 	}
-	if data, err := os.ReadFile("/etc/ipsec.d/jinom-psk"); err == nil {
+	if data, err := os.ReadFile(pskPath); err == nil {
 		s.psk = strings.TrimSpace(string(data))
 	}
 	return s.psk
 }
 
+func (s *L2TPService) setPSK(psk string) {
+	s.pskMu.Lock()
+	s.psk = psk
+	s.pskMu.Unlock()
+}
 
-func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
+func routesFilePath(ns string) string {
+	return filepath.Join(pppDir, fmt.Sprintf("routes.%s", ns))
+}
+
+func srcIPFilePath(ns string) string {
+	return filepath.Join(pppDir, fmt.Sprintf("srcip.%s", ns))
+}
+
+// writeSrcIPFile menulis alamat sumber SNAT untuk namespace ini, dibaca oleh
+// skrip ip-up. Ketidakhadiran file berarti "pakai MASQUERADE", sehingga mode
+// dikendalikan sepenuhnya oleh ada/tidaknya file — tanpa percabangan tambahan
+// di dalam skrip shell.
+func (s *L2TPService) writeSrcIPFile(t *tunnel.ResellerTunnel) error {
+	path := srcIPFilePath(t.Namespace)
+
+	srcIP := stripCIDR(t.ServerIPAddress)
+	if s.snatMode != SNATModeServerIP || srcIP == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove srcip file: %w", err)
+		}
+		return nil
+	}
+	return writeFileAtomic(path, []byte(srcIP+"\n"), 0600)
+}
+
+func (s *L2TPService) writeRoutesFile(t *tunnel.ResellerTunnel) error {
+	data := strings.Join(effectiveSubnets(t.MonitoringSubnets), "\n") + "\n"
+	if err := writeFileAtomic(routesFilePath(t.Namespace), []byte(data), 0600); err != nil {
+		return fmt.Errorf("write routes file: %w", err)
+	}
+	return nil
+}
+
+func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) error {
 	s.log.Info("Setting up L2TP/IPSec tunnel (Global Mode)",
 		zap.String("namespace", t.Namespace),
 		zap.String("tunnel", t.Name),
+		zap.String("snat_mode", s.snatMode),
 	)
-
-	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
-	s.cleanupRouting(stripPort(t.RouterIP), nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
-	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
-	_ = exec.Command("ip", "link", "del", vethHost).Run()
 
 	if err := s.updateChapSecrets(t); err != nil {
 		return fmt.Errorf("update chap secrets: %w", err)
 	}
 
-	routesPath := filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace))
-	routesData := strings.Join(effectiveSubnets(t.MonitoringSubnets), "\n") + "\n"
-	if err := os.WriteFile(routesPath, []byte(routesData), 0600); err != nil {
-		return fmt.Errorf("write routes file: %w", err)
+	if err := s.writeRoutesFile(t); err != nil {
+		return err
+	}
+
+	if err := s.writeSrcIPFile(t); err != nil {
+		return err
 	}
 
 	if err := s.setupVeth(t); err != nil {
@@ -68,10 +152,8 @@ func (s *L2TPService) Setup(t *tunnel.ResellerTunnel) (err error) {
 }
 
 func (s *L2TPService) ReloadRoutes(t *tunnel.ResellerTunnel, oldSubnets []string) error {
-	routesPath := filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace))
-	routesData := strings.Join(effectiveSubnets(t.MonitoringSubnets), "\n") + "\n"
-	if err := os.WriteFile(routesPath, []byte(routesData), 0600); err != nil {
-		return fmt.Errorf("write routes file: %w", err)
+	if err := s.writeRoutesFile(t); err != nil {
+		return err
 	}
 
 	ifName := s.findPPPInterface(t.Namespace)
@@ -93,7 +175,9 @@ func (s *L2TPService) ReloadRoutes(t *tunnel.ResellerTunnel, oldSubnets []string
 		}
 	}
 	for _, subnet := range added {
-		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "add", subnet, "dev", ifName); err != nil {
+		// "replace" bukan "add": bila sesi PPP lama belum hilang, route yang
+		// sama masih terpasang pada interface lain dan "add" akan gagal.
+		if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "replace", subnet, "dev", ifName); err != nil {
 			return fmt.Errorf("add route %s: %w", subnet, err)
 		}
 	}
@@ -112,19 +196,35 @@ func (s *L2TPService) Teardown(t *tunnel.ResellerTunnel) error {
 		zap.String("namespace", t.Namespace),
 	)
 
-	_ = s.removeChapSecrets(t.Namespace)
-	_ = os.Remove(filepath.Join("/etc/ppp", fmt.Sprintf("routes.%s", t.Namespace)))
+	if err := s.removeChapSecrets(t.Namespace); err != nil {
+		s.log.Warn("Teardown: failed to remove chap secrets",
+			zap.String("namespace", t.Namespace), zap.Error(err))
+	}
+	_ = os.Remove(routesFilePath(t.Namespace))
+	_ = os.Remove(srcIPFilePath(t.Namespace))
 
-	_, _, nsIPNoMask, _ := indexToVethIPs(t.TunnelIndex)
-	s.cleanupRouting(stripPort(t.RouterIP), nsIPNoMask, t.TunnelIndex, t.ClientIPAddress)
-	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
-	_ = exec.Command("ip", "link", "del", vethHost).Run()
-
-	_ = exec.Command("pkill", "-f", fmt.Sprintf("pppd.*%s", t.L2TPUsername)).Run()
+	s.disconnectSessions(t.Namespace)
+	s.teardownVeth(t.TunnelIndex)
 
 	return nil
 }
 
-func (s *L2TPService) IPSecStatusall(_ string) ([]byte, error) {
-	return []byte("Security Associations (0 up, 0 connecting)"), nil
+// disconnectSessions memutus sesi PPP milik satu namespace saja.
+//
+// Versi sebelumnya memakai `pkill -f "pppd.*<username>"`, yang bermasalah dua
+// arah: pola itu juga cocok dengan cmdline reseller lain yang namanya berawalan
+// sama (jinom-res-1 cocok dengan jinom-res-12), sementara pppd yang di-spawn
+// xl2tpd umumnya tidak memuat username di argv sehingga pola itu justru tidak
+// pernah cocok. Menghapus interface di dalam namespace bersifat terbatas pada
+// namespace tersebut dan membuat pppd keluar karena hangup.
+func (s *L2TPService) disconnectSessions(ns string) {
+	if !s.nsSvc.Exists(ns) {
+		return
+	}
+	for _, ifName := range s.findPPPInterfaces(ns) {
+		if _, err := s.nsSvc.ExecInNS(ns, "ip", "link", "del", ifName); err != nil {
+			s.log.Warn("Failed to remove ppp interface during teardown",
+				zap.String("namespace", ns), zap.String("interface", ifName), zap.Error(err))
+		}
+	}
 }

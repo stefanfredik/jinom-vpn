@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestStripPort(t *testing.T) {
 	cases := []struct {
@@ -39,6 +42,26 @@ func TestStripCIDR(t *testing.T) {
 	for _, c := range cases {
 		if got := stripCIDR(c.in); got != c.want {
 			t.Errorf("stripCIDR(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFormatTunnelUptime(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{45 * time.Second, "45s"},
+		{5*time.Minute + 30*time.Second, "5m30s"},
+		// Cabang jam sebelumnya mencetak "hours" dua kali, sehingga 2j5m9d
+		// tampil sebagai "2h2m5s".
+		{2*time.Hour + 5*time.Minute + 9*time.Second, "2h5m9s"},
+		{25*time.Hour + 3*time.Minute, "1d1h3m"},
+		{-time.Second, "0s"},
+	}
+	for _, c := range cases {
+		if got := formatTunnelUptime(c.d); got != c.want {
+			t.Errorf("formatTunnelUptime(%s) = %q, want %q", c.d, got, c.want)
 		}
 	}
 }

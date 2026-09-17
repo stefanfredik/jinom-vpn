@@ -1,0 +1,17 @@
+# Salin ke /etc/logrotate.d/jinom-vpn-ppp
+#
+# Skrip ip-up/ip-down sudah punya pengaman ukuran bawaan (memindahkan log ke
+# .1 saat melewati 8 MB) supaya partisi tidak pernah penuh meski logrotate
+# belum terpasang. File ini adalah penanganan yang semestinya: rotasi harian
+# dengan riwayat yang bisa ditelusuri.
+/var/log/jinom-vpn-ppp.log {
+    daily
+    rotate 7
+    size 8M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 root adm
+}

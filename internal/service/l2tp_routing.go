@@ -3,11 +3,17 @@ package service
 import (
 	"fmt"
 	"net"
-	"os/exec"
 	"strings"
+
+	"go.uber.org/zap"
 
 	"github.com/jinom/vpn/internal/domain/tunnel"
 )
+
+// maxRuleDeleteIterations membatasi loop penghapusan rule duplikat. Tanpa batas
+// ini, satu kondisi tak terduga di mana `iptables -D` selalu sukses akan
+// memutar loop tanpa henti dan mengunci jalur Setup/Teardown.
+const maxRuleDeleteIterations = 50
 
 func stripCIDR(addr string) string {
 	ip, _, err := net.ParseCIDR(addr)
@@ -46,62 +52,52 @@ func indexToVethIPs(index int) (hostIP, nsIP, nsIPNoMask, subnet string) {
 	return
 }
 
-func (s *L2TPService) deleteRule(args ...string) {
-	for {
+// deleteRuleRepeatedly menghapus rule yang sama berulang kali sampai tidak ada
+// lagi salinannya, dengan batas iterasi agar tidak pernah berputar tak hingga.
+func deleteRuleRepeatedly(args ...string) {
+	for i := 0; i < maxRuleDeleteIterations; i++ {
 		full := append([]string{"-w"}, args...)
-		if exec.Command("iptables", full...).Run() != nil {
-			break
+		if !runQuiet("iptables", full...) {
+			return
 		}
 	}
+}
+
+// ensureRule memasang rule hanya bila belum ada, memakai `iptables -C` sebagai
+// pemeriksa.
+//
+// Versi sebelumnya selalu memakai `-I` tanpa pemeriksaan, sementara jalur
+// teardown menghapus rule dalam bentuk yang berbeda (`-s <ip>` alih-alih
+// `-i <veth>`). Akibatnya chain FORWARD bertambah dua rule setiap Setup — dan
+// Setup dijalankan ulang pada setiap Reconcile — sehingga chain tumbuh tanpa
+// batas dan menjadi beban per-paket.
+func ensureRule(table, chain string, spec ...string) {
+	check := append([]string{"-w", "-t", table, "-C", chain}, spec...)
+	if runQuiet("iptables", check...) {
+		return
+	}
+	insert := append([]string{"-w", "-t", table, "-I", chain}, spec...)
+	_ = runQuiet("iptables", insert...)
 }
 
 func (s *L2TPService) routeTableID(index int) string {
 	return fmt.Sprintf("%d", 1000+index)
 }
 
-func (s *L2TPService) cleanupRouting(routerIP, nsIPNoMask string, index int, clientIP string) {
-	_, _, _, subnet := indexToVethIPs(index)
-	oldIPs := []string{nsIPNoMask, "10.254.222.2", "10.254.0.2"}
-
-	for _, ip := range oldIPs {
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", ip+":500")
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", ip+":4500")
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", ip+":1701")
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "500", "-j", "DNAT", "--to-destination", ip+":500")
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "4500", "-j", "DNAT", "--to-destination", ip+":4500")
-		s.deleteRule("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-p", "udp", "--dport", "1701", "-j", "DNAT", "--to-destination", ip+":1701")
-		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":500")
-		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "4500", "-j", "SNAT", "--to-source", s.vpsPublicIP+":4500")
-		s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", ip, "-p", "udp", "--sport", "1701", "-j", "SNAT", "--to-source", s.vpsPublicIP+":1701")
-		s.deleteRule("-t", "filter", "-D", "FORWARD", "-d", ip, "-j", "ACCEPT")
-		s.deleteRule("-t", "filter", "-D", "FORWARD", "-s", ip, "-j", "ACCEPT")
+// forwardRuleSpecs mengembalikan rule FORWARD milik satu veth host.
+func forwardRuleSpecs(vethHost string) [][]string {
+	return [][]string{
+		{"-i", vethHost, "-j", "ACCEPT"},
+		{"-o", vethHost, "-j", "ACCEPT"},
 	}
-
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", routerIP, "-j", "MASQUERADE")
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE")
-	s.deleteRule("-t", "nat", "-D", "POSTROUTING", "-s", clientIP, "-j", "MASQUERADE")
-
-	tableID := s.routeTableID(index)
-	for {
-		if exec.Command("ip", "rule", "del", "from", routerIP, "lookup", tableID).Run() != nil {
-			break
-		}
-	}
-	_ = exec.Command("ip", "route", "flush", "table", tableID).Run()
-
-	_ = exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "500").Run()
-	_ = exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "4500").Run()
-	_ = exec.Command("conntrack", "-D", "-s", routerIP, "-p", "udp", "--dport", "1701").Run()
-	_ = exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "500").Run()
-	_ = exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "4500").Run()
-	_ = exec.Command("conntrack", "-D", "-d", routerIP, "-p", "udp", "--sport", "1701").Run()
 }
 
-func (s *L2TPService) findPPPInterface(ns string) string {
+func (s *L2TPService) findPPPInterfaces(ns string) []string {
 	out, err := s.nsSvc.ExecInNS(ns, "ip", "-o", "link", "show")
 	if err != nil {
-		return ""
+		return nil
 	}
+	var found []string
 	for _, line := range strings.Split(string(out), "\n") {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) < 3 {
@@ -112,8 +108,15 @@ func (s *L2TPService) findPPPInterface(ns string) string {
 			name = name[:at]
 		}
 		if strings.HasPrefix(name, "ppp") {
-			return name
+			found = append(found, name)
 		}
+	}
+	return found
+}
+
+func (s *L2TPService) findPPPInterface(ns string) string {
+	if ifaces := s.findPPPInterfaces(ns); len(ifaces) > 0 {
+		return ifaces[0]
 	}
 	return ""
 }
@@ -123,35 +126,104 @@ func (s *L2TPService) setupVeth(t *tunnel.ResellerTunnel) error {
 	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
 	vethNS := fmt.Sprintf("vn-%d", t.TunnelIndex)
 
-	_ = exec.Command("ip", "link", "del", vethHost).Run()
+	_ = runQuiet("ip", "link", "del", vethHost)
 
-	if err := exec.Command("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNS).Run(); err != nil {
+	if _, err := runCmd(defaultCmdTimeout, "ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNS); err != nil {
 		return fmt.Errorf("create veth: %w", err)
 	}
 
-	if err := exec.Command("ip", "addr", "add", hostIP, "dev", vethHost).Run(); err != nil {
+	if _, err := runCmd(defaultCmdTimeout, "ip", "addr", "add", hostIP, "dev", vethHost); err != nil {
 		return fmt.Errorf("assign host veth ip: %w", err)
 	}
-	if err := exec.Command("ip", "link", "set", vethHost, "up").Run(); err != nil {
+	if _, err := runCmd(defaultCmdTimeout, "ip", "link", "set", vethHost, "up"); err != nil {
 		return fmt.Errorf("bring up host veth: %w", err)
 	}
 
-	if err := exec.Command("ip", "link", "set", vethNS, "netns", t.Namespace).Run(); err != nil {
+	if _, err := runCmd(defaultCmdTimeout, "ip", "link", "set", vethNS, "netns", t.Namespace); err != nil {
 		return fmt.Errorf("move peer to namespace: %w", err)
 	}
 
-	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNS).Run(); err != nil {
+	if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "addr", "add", nsIP, "dev", vethNS); err != nil {
 		return fmt.Errorf("assign ns veth ip: %w", err)
 	}
-	if err := exec.Command("ip", "netns", "exec", t.Namespace, "ip", "link", "set", vethNS, "up").Run(); err != nil {
+	if _, err := s.nsSvc.ExecInNS(t.Namespace, "ip", "link", "set", vethNS, "up"); err != nil {
 		return fmt.Errorf("bring up ns veth: %w", err)
 	}
 
 	hostIPNoMask := stripCIDR(hostIP)
-	_ = exec.Command("ip", "netns", "exec", t.Namespace, "ip", "route", "add", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS).Run()
+	_, _ = s.nsSvc.ExecInNS(t.Namespace, "ip", "route", "replace", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS)
 
-	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-i", vethHost, "-j", "ACCEPT").Run()
-	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-o", vethHost, "-j", "ACCEPT").Run()
+	for _, spec := range forwardRuleSpecs(vethHost) {
+		ensureRule("filter", "FORWARD", spec...)
+	}
 
 	return nil
+}
+
+// teardownVeth melepas veth berikut rule FORWARD-nya. Bentuk rule yang dihapus
+// sengaja identik dengan yang dipasang setupVeth.
+func (s *L2TPService) teardownVeth(index int) {
+	vethHost := fmt.Sprintf("vh-%d", index)
+	_ = runQuiet("ip", "link", "del", vethHost)
+	for _, spec := range forwardRuleSpecs(vethHost) {
+		deleteRuleRepeatedly(append([]string{"-t", "filter", "-D", "FORWARD"}, spec...)...)
+	}
+}
+
+// PurgeLegacyRouting menghapus sisa konfigurasi dari desain lama, ketika setiap
+// namespace menjalankan strongswan/xl2tpd sendiri dan trafik IPSec di-DNAT ke
+// dalam namespace.
+//
+// Pada mode global sekarang tidak ada satu pun kode yang membuat rule tersebut,
+// sehingga penghapusannya adalah migrasi sekali jalan — bukan pekerjaan yang
+// perlu diulang pada setiap Setup dan Teardown seperti sebelumnya. Versi lama
+// menjalankan lebih dari 80 proses iptables/conntrack per tunnel di jalur
+// panas, masing-masing mengantre pada xtables lock global.
+//
+// Daftar IP hardcoded "10.254.222.2" dan "10.254.0.2" juga dibuang: yang kedua
+// adalah persis nsIP milik tunnel index 0, sehingga setiap Setup/Teardown
+// tunnel mana pun ikut menghapus rule milik tunnel pertama.
+func (s *L2TPService) PurgeLegacyRouting(tunnels []tunnel.ResellerTunnel) {
+	if len(tunnels) == 0 {
+		return
+	}
+	s.log.Info("Purging legacy per-namespace IPSec routing artifacts",
+		zap.Int("tunnels", len(tunnels)))
+
+	for i := range tunnels {
+		t := &tunnels[i]
+		if t.VPNType != tunnel.VPNTypeL2TP {
+			continue
+		}
+		routerIP := stripPort(t.RouterIP)
+		if routerIP == "" {
+			continue
+		}
+		_, _, nsIPNoMask, subnet := indexToVethIPs(t.TunnelIndex)
+
+		for _, port := range []string{"500", "4500", "1701"} {
+			deleteRuleRepeatedly("-t", "nat", "-D", "PREROUTING", "-s", routerIP, "-d", s.vpsPublicIP,
+				"-p", "udp", "--dport", port, "-j", "DNAT", "--to-destination", nsIPNoMask+":"+port)
+			deleteRuleRepeatedly("-t", "nat", "-D", "PREROUTING", "-s", routerIP,
+				"-p", "udp", "--dport", port, "-j", "DNAT", "--to-destination", nsIPNoMask+":"+port)
+			deleteRuleRepeatedly("-t", "nat", "-D", "POSTROUTING", "-s", nsIPNoMask,
+				"-p", "udp", "--sport", port, "-j", "SNAT", "--to-source", s.vpsPublicIP+":"+port)
+		}
+		deleteRuleRepeatedly("-t", "filter", "-D", "FORWARD", "-d", nsIPNoMask, "-j", "ACCEPT")
+		deleteRuleRepeatedly("-t", "filter", "-D", "FORWARD", "-s", nsIPNoMask, "-j", "ACCEPT")
+
+		deleteRuleRepeatedly("-t", "nat", "-D", "POSTROUTING", "-s", routerIP, "-j", "MASQUERADE")
+		deleteRuleRepeatedly("-t", "nat", "-D", "POSTROUTING", "-s", subnet, "-j", "MASQUERADE")
+		if t.ClientIPAddress != "" {
+			deleteRuleRepeatedly("-t", "nat", "-D", "POSTROUTING", "-s", t.ClientIPAddress, "-j", "MASQUERADE")
+		}
+
+		tableID := s.routeTableID(t.TunnelIndex)
+		for attempt := 0; attempt < maxRuleDeleteIterations; attempt++ {
+			if !runQuiet("ip", "rule", "del", "from", routerIP, "lookup", tableID) {
+				break
+			}
+		}
+		_ = runQuiet("ip", "route", "flush", "table", tableID)
+	}
 }

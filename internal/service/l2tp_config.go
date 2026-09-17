@@ -5,26 +5,97 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
+
+// daemonCmdTimeout memberi ruang untuk systemctl start/restart yang menunggu
+// unit selesai berpindah state.
+const daemonCmdTimeout = 30 * time.Second
 
 // generateIPSecPSK generates a cryptographically random IPSec pre-shared key.
 func generateIPSecPSK() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		return "fallback-psk-change-me"
+		return ""
 	}
 	return hex.EncodeToString(b)
 }
 
+// writeConfigIfChanged menulis file hanya bila isinya berbeda, dan melaporkan
+// apakah terjadi perubahan.
+//
+// Ini yang memungkinkan daemon tidak di-restart pada setiap start proses.
+// Sebelumnya initGlobalDaemons selalu menjalankan `systemctl restart` untuk
+// strongswan dan xl2tpd, sehingga setiap deploy, restart, atau crash-loop
+// memutus seluruh sesi L2TP semua reseller sekaligus dan memicu renegosiasi
+// IKE serempak dari semua router.
+func (s *L2TPService) writeConfigIfChanged(path string, data []byte, perm os.FileMode) bool {
+	if fileContentEquals(path, data) {
+		return false
+	}
+	if err := writeFileAtomic(path, data, perm); err != nil {
+		s.log.Error("Failed to write config file", zap.String("path", path), zap.Error(err))
+		return false
+	}
+	s.log.Info("Config file updated", zap.String("path", path))
+	return true
+}
+
+// ensureDaemon memastikan unit aktif, dan hanya me-restart bila konfigurasinya
+// benar-benar berubah.
+func (s *L2TPService) ensureDaemon(unit string, configChanged bool) {
+	if _, err := runCmd(daemonCmdTimeout, "systemctl", "enable", unit); err != nil {
+		s.log.Warn("Failed to enable unit", zap.String("unit", unit), zap.Error(err))
+	}
+
+	active := runQuiet("systemctl", "is-active", "--quiet", unit)
+
+	switch {
+	case !active:
+		s.log.Info("Starting daemon", zap.String("unit", unit))
+		if _, err := runCmd(daemonCmdTimeout, "systemctl", "start", unit); err != nil {
+			s.log.Error("Failed to start daemon", zap.String("unit", unit), zap.Error(err))
+		}
+	case configChanged:
+		s.log.Warn("Config changed, restarting daemon — active sessions will reconnect",
+			zap.String("unit", unit))
+		if _, err := runCmd(daemonCmdTimeout, "systemctl", "restart", unit); err != nil {
+			s.log.Error("Failed to restart daemon", zap.String("unit", unit), zap.Error(err))
+		}
+	default:
+		s.log.Info("Daemon already running with current config, not restarting",
+			zap.String("unit", unit))
+	}
+}
+
 func (s *L2TPService) initGlobalDaemons() {
-	// 1. Setup IPsec (StrongSwan) Global Config
-	ipsecConf := `config setup
+	ipsecChanged := s.writeIPSecConf()
+	secretsChanged := s.initPSK()
+	xl2tpdChanged := s.writeXL2TPDConf()
+	pppChanged := s.writePPPOptions()
+
+	s.ensureDaemon("strongswan-starter", ipsecChanged || secretsChanged)
+	// Perubahan pada options.xl2tpd baru berlaku untuk sesi pppd berikutnya,
+	// yang di-spawn oleh xl2tpd — karena itu keduanya dikelompokkan di sini.
+	s.ensureDaemon("xl2tpd", xl2tpdChanged || pppChanged)
+}
+
+func (s *L2TPService) writeIPSecConf() bool {
+	if s.vpsPublicIP == "" || s.vpsPublicIP == "0.0.0.0" {
+		// Menulis "left=" kosong menghasilkan conn yang gagal dimuat charon,
+		// yang berarti seluruh L2TP mati. Lebih baik mempertahankan config
+		// yang ada dan berteriak keras.
+		s.log.Error("VPS public IP is not configured — refusing to rewrite /etc/ipsec.conf. " +
+			"Set VPS_PUBLIC_IP; L2TP will keep using the previously written config, if any.")
+		return false
+	}
+
+	conf := fmt.Sprintf(`config setup
     uniqueids=never
-    charondebug="ike 1, knl 1, cfg 1"
+    charondebug="ike 0, knl 0, cfg 0"
 
 conn %%default
     keyingtries=3
@@ -44,34 +115,52 @@ conn L2TP-PSK
     right=%%any
     rightprotoport=17/%%any
     leftprotoport=17/1701
-`
-	_ = os.WriteFile("/etc/ipsec.conf", []byte(fmt.Sprintf(ipsecConf, s.vpsPublicIP)), 0644)
+`, s.vpsPublicIP)
 
-	// Persist IPSec PSK
-	pskPath := "/etc/ipsec.d/jinom-psk"
+	return s.writeConfigIfChanged(ipsecConfPath, []byte(conf), 0644)
+}
+
+// initPSK memuat PSK global yang persisten, atau membuatnya bila belum ada.
+func (s *L2TPService) initPSK() bool {
 	var psk string
-
 	if data, err := os.ReadFile(pskPath); err == nil {
 		psk = strings.TrimSpace(string(data))
 	}
 
 	if psk == "" {
 		psk = generateIPSecPSK()
-		_ = os.MkdirAll("/etc/ipsec.d", 0755)
-		if err := os.WriteFile(pskPath, []byte(psk), 0600); err != nil {
-			s.log.Warn("Failed to persist IPSec PSK, using generated value in memory", zap.Error(err))
+		if psk == "" {
+			s.log.Error("Failed to generate IPSec PSK — L2TP provisioning will not work")
+			return false
+		}
+		if err := os.MkdirAll("/etc/ipsec.d", 0755); err != nil {
+			s.log.Error("Failed to create /etc/ipsec.d", zap.Error(err))
+		}
+		if err := writeFileAtomic(pskPath, []byte(psk+"\n"), 0600); err != nil {
+			s.log.Error("Failed to persist IPSec PSK — a different key will be generated "+
+				"on next restart and every router will need re-provisioning", zap.Error(err))
+		} else {
+			// Ini bukan kejadian rutin: PSK global dipakai bersama oleh semua
+			// router. Kalau file-nya hilang, kunci baru ini tidak cocok dengan
+			// yang sudah tersimpan di router mana pun.
+			s.log.Warn("Generated a NEW global IPSec PSK. If L2TP tunnels already " +
+				"existed, every MikroTik must be re-provisioned with this key.")
 		}
 	}
 
-	ipsecSecrets := fmt.Sprintf(": PSK \"%s\"\n", psk)
-	_ = os.WriteFile("/etc/ipsec.secrets", []byte(ipsecSecrets), 0600)
-
-	s.psk = psk
+	s.setPSK(psk)
 	s.log.Info("IPSec PSK initialized", zap.Int("length", len(psk)))
 
+	return s.writeConfigIfChanged(ipsecSecPath, []byte(fmt.Sprintf(": PSK \"%s\"\n", psk)), 0600)
+}
 
-	// 2. Setup XL2TPD Global Config
-	xl2tpdConf := `[global]
+func (s *L2TPService) writeXL2TPDConf() bool {
+	// Catatan: "require chap" sengaja tidak dipakai. Baris itu membuat xl2tpd
+	// menambahkan "require-chap" (CHAP-MD5) ke pppd, sementara options.xl2tpd
+	// menuntut "require-mschap-v2" — dua syarat yang saling bertabrakan dan
+	// membuat hasil negosiasi bergantung pada urutan opsi. MikroTik menawarkan
+	// MS-CHAPv2 secara default, jadi satu syarat itu saja yang ditegakkan.
+	conf := `[global]
 port = 1701
 access control = no
 
@@ -79,18 +168,28 @@ access control = no
 exclusive = no
 ip range = 10.255.255.100-10.255.255.250
 local ip = 10.255.255.1
-require chap = yes
 refuse pap = yes
 require authentication = yes
 name = jinom-vpn
 pppoptfile = /etc/ppp/options.xl2tpd
 length bit = no
 `
-	_ = os.MkdirAll("/etc/xl2tpd", 0755)
-	_ = os.WriteFile("/etc/xl2tpd/xl2tpd.conf", []byte(xl2tpdConf), 0644)
+	if err := os.MkdirAll("/etc/xl2tpd", 0755); err != nil {
+		s.log.Error("Failed to create /etc/xl2tpd", zap.Error(err))
+	}
+	return s.writeConfigIfChanged("/etc/xl2tpd/xl2tpd.conf", []byte(conf), 0644)
+}
 
-	// 3. Setup PPP Options
-	pppOpts := `ipcp-accept-local
+func (s *L2TPService) writePPPOptions() bool {
+	// lcp-echo-interval 30 x lcp-echo-failure 4 = 120 detik, sengaja disamakan
+	// dengan dpdtimeout IPSec. Sebelumnya failure=8 (240 detik), sehingga ada
+	// jendela dua menit di mana IPSec sudah lenyap tapi interface ppp masih
+	// berstatus UP — dan pemeriksa status melaporkan tunnel sehat padahal
+	// sudah tidak bisa melewatkan paket.
+	//
+	// MTU 1380: 1500 dikurangi UDP-encap NAT-T (8) + ESP (~56) + IP (20) +
+	// UDP 1701 (8) + L2TP (12) + PPP (4) menyisakan ruang yang tipis pada 1400.
+	opts := `ipcp-accept-local
 ipcp-accept-remote
 require-mschap-v2
 ms-dns 8.8.8.8
@@ -102,65 +201,15 @@ novjccomp
 nobsdcomp
 nodeflate
 hide-password
-debug
 name jinom-vpn
 proxyarp
 lcp-echo-interval 30
-lcp-echo-failure 8
-mtu 1400
-mru 1400
+lcp-echo-failure 4
+mtu 1380
+mru 1380
 `
-	_ = os.MkdirAll("/etc/ppp", 0755)
-	_ = os.WriteFile("/etc/ppp/options.xl2tpd", []byte(pppOpts), 0644)
-
-	// 4. Restart services gracefully
-	_ = exec.Command("systemctl", "enable", "strongswan-starter").Run()
-	_ = exec.Command("systemctl", "enable", "xl2tpd").Run()
-	_ = exec.Command("systemctl", "restart", "strongswan-starter").Run()
-	_ = exec.Command("systemctl", "restart", "xl2tpd").Run()
-}
-
-func (s *L2TPService) installIPUpScript() {
-	scriptPath := "/etc/ppp/ip-up.d/99-jinom-routes"
-	scriptContent := `#!/bin/sh
-# Called by pppd when link comes up.
-# PEERNAME contains the authenticated username (e.g., jinom-res-123)
-
-exec >> /var/log/jinom-vpn-ppp.log 2>&1
-echo "=== ip-up triggered at $(date) ==="
-echo "Args: 1:$1 2:$2 3:$3 4:$4 5:$5 6:$6"
-echo "Env PEERNAME: $PEERNAME"
-
-if [ -n "$PEERNAME" ]; then
-    NS_NAME=$(echo "$PEERNAME" | sed 's/jinom-/ns-/')
-    echo "Derived namespace: $NS_NAME"
-    
-    if ip netns list | grep -q "^$NS_NAME"; then
-        echo "Moving $1 to namespace $NS_NAME"
-        ip link set "$1" netns "$NS_NAME"
-        ip netns exec "$NS_NAME" ip link set "$1" up
-        
-        echo "Assigning IP $4 peer $5 inside namespace"
-        ip netns exec "$NS_NAME" ip addr add $4 peer $5 dev "$1"
-        ip netns exec "$NS_NAME" ip route add default dev "$1" || true
-        
-        # Idempotent NAT masquerade: check before add
-        ip netns exec "$NS_NAME" iptables -t nat -C POSTROUTING -o "$1" -j MASQUERADE 2>/dev/null || \
-            ip netns exec "$NS_NAME" iptables -t nat -A POSTROUTING -o "$1" -j MASQUERADE
-        
-        if [ -f "/etc/ppp/routes.$NS_NAME" ]; then
-            while read subnet; do
-                if [ -n "$subnet" ]; then
-                    echo "Adding route to $subnet"
-                    ip netns exec "$NS_NAME" ip route add "$subnet" dev "$1" || true
-                fi
-            done < "/etc/ppp/routes.$NS_NAME"
-        fi
-    else
-        echo "Namespace $NS_NAME not found!"
-    fi
-fi
-`
-	_ = os.MkdirAll("/etc/ppp/ip-up.d", 0755)
-	_ = os.WriteFile(scriptPath, []byte(scriptContent), 0755)
+	if err := os.MkdirAll(pppDir, 0755); err != nil {
+		s.log.Error("Failed to create /etc/ppp", zap.Error(err))
+	}
+	return s.writeConfigIfChanged("/etc/ppp/options.xl2tpd", []byte(opts), 0644)
 }

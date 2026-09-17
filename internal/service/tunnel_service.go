@@ -24,6 +24,9 @@ type TunnelService struct {
 	setupMu     sync.Mutex
 	nocMu       sync.Mutex
 	onDelete    func(id string)
+
+	routerCacheMu sync.Mutex
+	routerCache   map[uuid.UUID]routerStatusEntry
 }
 
 func (s *TunnelService) SetOnDeleteHook(fn func(id string)) {
@@ -47,6 +50,7 @@ func NewTunnelService(
 		provisioner: provisioner,
 		vpsPublicIP: vpsPublicIP,
 		log:         log,
+		routerCache: make(map[uuid.UUID]routerStatusEntry),
 	}
 }
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap"
@@ -96,22 +94,44 @@ func (s *TunnelService) tunnelRuntimeHealthy(t *tunnel.ResellerTunnel) bool {
 		return false
 	}
 	if t.VPNType == tunnel.VPNTypeL2TP {
-		return s.l2tpDaemonsAlive(t.Namespace)
+		return s.l2tpRuntimeHealthy(t)
 	}
 	return s.interfaceUpInNS(t.Namespace, fmt.Sprintf("wg-%s", t.Namespace))
 }
 
-func (s *TunnelService) l2tpDaemonsAlive(ns string) bool {
-	pidPath := filepath.Join("/run", fmt.Sprintf("xl2tpd-%s.pid", ns))
-	data, err := os.ReadFile(pidPath)
+// l2tpRuntimeHealthy memeriksa keadaan runtime L2TP yang sebenarnya.
+//
+// Versi sebelumnya membaca /run/xl2tpd-<ns>.pid, sisa desain lama ketika setiap
+// namespace menjalankan xl2tpd sendiri. Pada mode global sekarang file itu
+// tidak pernah ditulis siapa pun, sehingga pemeriksaan selalu mengembalikan
+// false dan Reconcile menjalankan Setup penuh untuk setiap tunnel L2TP pada
+// setiap start — menghapus dan membuat ulang veth serta menulis ulang
+// chap-secrets tanpa alasan.
+func (s *TunnelService) l2tpRuntimeHealthy(t *tunnel.ResellerTunnel) bool {
+	// Sesi PPP dimulai oleh router (client-initiated), jadi ketiadaan sesi
+	// bukan indikasi runtime VPS rusak. Yang harus dipastikan Reconcile adalah
+	// perangkat sisi VPS siap menerima sesi tersebut.
+	vethHost := fmt.Sprintf("vh-%d", t.TunnelIndex)
+	if !runQuiet("ip", "link", "show", vethHost) {
+		return false
+	}
+	if _, err := os.Stat(routesFilePath(t.Namespace)); err != nil {
+		return false
+	}
+	return s.chapSecretPresent(t.Namespace)
+}
+
+func (s *TunnelService) chapSecretPresent(ns string) bool {
+	lines, err := readChapLines()
 	if err != nil {
 		return false
 	}
-	pid := strings.TrimSpace(string(data))
-	if pid == "" {
-		return false
+	for _, line := range lines {
+		if lineNS, ok := chapLineNamespace(line); ok && lineNS == ns {
+			return true
+		}
 	}
-	return exec.Command("kill", "-0", pid).Run() == nil
+	return false
 }
 
 func (s *TunnelService) interfaceUpInNS(ns, ifName string) bool {

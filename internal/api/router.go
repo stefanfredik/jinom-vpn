@@ -30,6 +30,7 @@ func RegisterRoutes(app *fiber.App, deps RouterDeps) {
 	tunnels.Patch("/:id/subnets", deps.TunnelHandler.UpdateSubnets)
 	tunnels.Get("/:id/script", deps.TunnelHandler.GetScript)
 	tunnels.Get("/:id/status", deps.TunnelHandler.GetStatus)
+	tunnels.Get("/:id/verify", deps.TunnelHandler.Verify)
 	tunnels.Get("/:id/metrics", deps.TunnelHandler.GetMetrics)
 	tunnels.Get("/:id/history", deps.TunnelHandler.GetHistory)
 	tunnels.Post("/:id/provision", deps.TunnelHandler.Provision)

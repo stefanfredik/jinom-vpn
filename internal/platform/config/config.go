@@ -9,6 +9,10 @@ type Config struct {
 	AppEnv      string `mapstructure:"APP_ENV"`
 	ListenAddr  string `mapstructure:"LISTEN_ADDR"`
 	VPSPublicIP string `mapstructure:"VPS_PUBLIC_IP"`
+	// L2TPSNATMode: "snat" (default) mem-SNAT trafik monitoring ke
+	// ServerIPAddress tunnel sehingga cocok dengan rule 10.250.0.0/16 di
+	// MikroTik; "masquerade" mengembalikan perilaku lama sebagai jalan mundur.
+	L2TPSNATMode string `mapstructure:"L2TP_SNAT_MODE"`
 
 	Database DatabaseConfig `mapstructure:",squash"`
 	Security SecurityConfig `mapstructure:",squash"`
@@ -39,6 +43,7 @@ func LoadConfig(path string) *Config {
 	viper.SetDefault("APP_ENV", "development")
 	viper.SetDefault("LISTEN_ADDR", ":8090")
 	viper.SetDefault("VPS_PUBLIC_IP", "")
+	viper.SetDefault("L2TP_SNAT_MODE", "snat")
 	viper.SetDefault("DB_HOST", "localhost")
 	viper.SetDefault("DB_PORT", 5432)
 	viper.SetDefault("DB_USER", "nms_user")
@@ -51,6 +56,7 @@ func LoadConfig(path string) *Config {
 	_ = viper.BindEnv("APP_ENV")
 	_ = viper.BindEnv("LISTEN_ADDR")
 	_ = viper.BindEnv("VPS_PUBLIC_IP")
+	_ = viper.BindEnv("L2TP_SNAT_MODE")
 	_ = viper.BindEnv("DB_HOST")
 	_ = viper.BindEnv("DB_PORT")
 	_ = viper.BindEnv("DB_USER")

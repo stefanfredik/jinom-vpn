@@ -2,8 +2,8 @@ package service
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -94,19 +94,23 @@ func normalizeRouteDst(dst string) string {
 }
 
 func (s *NamespaceService) ExecInNS(ns string, name string, args ...string) ([]byte, error) {
+	return s.ExecInNSTimeout(defaultCmdTimeout, ns, name, args...)
+}
+
+// ExecInNSTimeout menjalankan perintah di dalam namespace dengan batas waktu
+// eksplisit. Perintah yang memang lambat secara sah (ping dengan beberapa
+// percobaan) memakai batas lebih longgar lewat fungsi ini; sisanya memakai
+// defaultCmdTimeout supaya satu perintah menggantung tidak mengunci pemanggil.
+func (s *NamespaceService) ExecInNSTimeout(timeout time.Duration, ns string, name string, args ...string) ([]byte, error) {
 	cmdArgs := append([]string{"netns", "exec", ns, name}, args...)
-	out, err := exec.Command("ip", cmdArgs...).CombinedOutput()
+	out, err := runCmd(timeout, "ip", cmdArgs...)
 	if err != nil {
-		return out, fmt.Errorf("exec in %s: %s: %w", ns, string(out), err)
+		return out, fmt.Errorf("exec in %s: %w", ns, err)
 	}
 	return out, nil
 }
 
 func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %w", string(out), err)
-	}
-	return nil
+	_, err := runCmd(defaultCmdTimeout, name, args...)
+	return err
 }

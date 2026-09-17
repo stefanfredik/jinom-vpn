@@ -8,7 +8,7 @@ MAIN_FILE := cmd/server/main.go
 CYAN := \033[0;36m
 RESET := \033[0m
 
-.PHONY: all build run test clean dev help setup
+.PHONY: all build run test test-race vet clean dev help setup install-logrotate
 
 all: build
 
@@ -21,7 +21,10 @@ help:
 	@echo "  test          Run tests"
 	@echo "  clean         Remove binary and build artifacts"
 	@echo "  dev           Run the application as root with hot reload (requires air)"
+	@echo "  test-race     Run tests with the race detector"
+	@echo "  vet           Run go vet"
 	@echo "  setup         Setup the VPN infrastructure on the host (requires root)"
+	@echo "  install-logrotate  Install log rotation for the PPP hook log (requires root)"
 
 build:
 	@echo "$(CYAN)Building $(APP_NAME)...$(RESET)"
@@ -35,6 +38,14 @@ run: build
 test:
 	@echo "$(CYAN)Running tests...$(RESET)"
 	@go test -v ./...
+
+test-race:
+	@echo "$(CYAN)Running tests with race detector...$(RESET)"
+	@go test -race ./...
+
+vet:
+	@echo "$(CYAN)Running go vet...$(RESET)"
+	@go vet ./...
 
 clean:
 	@echo "$(CYAN)Cleaning build artifacts...$(RESET)"
@@ -51,3 +62,7 @@ dev:
 setup:
 	@echo "$(CYAN)Setting up VPN infrastructure...$(RESET)"
 	@sudo ./scripts/setup-vpn-infra.sh
+
+install-logrotate:
+	@echo "$(CYAN)Installing logrotate config...$(RESET)"
+	@sudo install -m 0644 deploy/jinom-vpn-ppp.logrotate /etc/logrotate.d/jinom-vpn-ppp

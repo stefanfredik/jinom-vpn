@@ -85,10 +85,13 @@ func (s *WireGuardService) setupVeth(t *tunnel.ResellerTunnel) error {
 	}
 
 	hostIPNoMask := stripCIDR(hostIP)
-	_ = exec.Command("ip", "netns", "exec", t.Namespace, "ip", "route", "add", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS).Run()
+	_ = exec.Command("ip", "netns", "exec", t.Namespace, "ip", "route", "replace", "10.50.0.0/24", "via", hostIPNoMask, "dev", vethNS).Run()
 
-	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-i", vethHost, "-j", "ACCEPT").Run()
-	_ = exec.Command("iptables", "-w", "-t", "filter", "-I", "FORWARD", "-o", vethHost, "-j", "ACCEPT").Run()
+	// ensureRule memasang hanya bila belum ada. Setup dijalankan ulang oleh
+	// Reconcile, dan Teardown hanya menghapus satu salinan per rule.
+	for _, spec := range forwardRuleSpecs(vethHost) {
+		ensureRule("filter", "FORWARD", spec...)
+	}
 
 	return nil
 }

@@ -104,3 +104,18 @@ func (h *TunnelHandler) GetHistory(c *fiber.Ctx) error {
 		"data":    history,
 	})
 }
+
+// Verify melaporkan kesiapan objek MikroTik tanpa mengubah apa pun di router.
+func (h *TunnelHandler) Verify(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return badRequest(c, "invalid tunnel id")
+	}
+
+	result, err := h.svc.VerifyRouter(c.Context(), id)
+	if err != nil {
+		return handleTunnelError(c, err)
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": result})
+}
