@@ -28,6 +28,14 @@ func (s *TunnelService) Reconcile(ctx context.Context) {
 	}
 	s.log.Info("Reconcile: restoring active tunnels", zap.Int("count", len(tunnels)))
 
+	// Pemeriksaan hak sekali di depan: kalau `ip netns` saja tidak bisa dipakai,
+	// tidak ada satu pun tunnel yang bisa dipulihkan, dan mencatat 168 error ke
+	// database hanya menutupi tunnel yang sebenarnya sehat.
+	if err := run("ip", "netns", "list"); err != nil && isPermissionError(err) {
+		s.log.Error("Reconcile: insufficient privilege for ip netns; skipping without touching tunnel status", zap.Error(err))
+		return
+	}
+
 	for i := range tunnels {
 		t := &tunnels[i]
 
@@ -46,7 +54,9 @@ func (s *TunnelService) Reconcile(ctx context.Context) {
 			if err := s.nsSvc.Create(t.Namespace); err != nil {
 				s.log.Error("Reconcile: create namespace failed",
 					zap.String("id", t.ID.String()), zap.Error(err))
-				s.setError(ctx, t.ID, err)
+				if !isPermissionError(err) {
+					s.setError(ctx, t.ID, err)
+				}
 				continue
 			}
 		}
@@ -61,7 +71,9 @@ func (s *TunnelService) Reconcile(ctx context.Context) {
 		if setupErr != nil {
 			s.log.Error("Reconcile: setup failed",
 				zap.String("id", t.ID.String()), zap.Error(setupErr))
-			s.setError(ctx, t.ID, setupErr)
+			if !isPermissionError(setupErr) {
+				s.setError(ctx, t.ID, setupErr)
+			}
 			continue
 		}
 		s.log.Info("Reconcile: tunnel restored", zap.String("id", t.ID.String()))

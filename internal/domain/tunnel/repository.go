@@ -14,8 +14,11 @@ type Repository interface {
 	FindByNamespace(ctx context.Context, namespace string) (*ResellerTunnel, error)
 	FindByTunnelIndex(ctx context.Context, index int) (*ResellerTunnel, error)
 	FindActive(ctx context.Context) ([]ResellerTunnel, error)
-	// FindActiveOrDown returns tunnels in 'active' OR 'down' state for health monitoring.
-	FindActiveOrDown(ctx context.Context) ([]ResellerTunnel, error)
+	// FindMonitored returns tunnels the health monitor must keep checking:
+	// 'active', 'down', and 'error'. Tunnel berstatus error ikut dipantau
+	// supaya yang runtime-nya ternyata sehat (mis. salah ditandai error oleh
+	// proses lain) kembali 'active' dengan sendirinya, bukan tersangkut selamanya.
+	FindMonitored(ctx context.Context) ([]ResellerTunnel, error)
 	NextTunnelIndex(ctx context.Context) (int, error)
 	Save(ctx context.Context, t *ResellerTunnel) error
 	// UpdateSubnets updates monitoring_subnets with optimistic locking against expectedUpdatedAt.

@@ -139,13 +139,13 @@ func (r *TunnelRepository) FindActive(ctx context.Context) ([]tunnel.ResellerTun
 	return tunnels, nil
 }
 
-func (r *TunnelRepository) FindActiveOrDown(ctx context.Context) ([]tunnel.ResellerTunnel, error) {
+func (r *TunnelRepository) FindMonitored(ctx context.Context) ([]tunnel.ResellerTunnel, error) {
 	var records []tunnelRecord
 	err := r.db.DB.SelectContext(ctx, &records,
-		`SELECT * FROM reseller_tunnels WHERE status IN ($1, $2) ORDER BY created_at`,
-		tunnel.StatusActive, tunnel.StatusDown)
+		`SELECT * FROM reseller_tunnels WHERE status IN ($1, $2, $3) ORDER BY created_at`,
+		tunnel.StatusActive, tunnel.StatusDown, tunnel.StatusError)
 	if err != nil {
-		return nil, fmt.Errorf("find active-or-down tunnels: %w", err)
+		return nil, fmt.Errorf("find monitored tunnels: %w", err)
 	}
 
 	tunnels := make([]tunnel.ResellerTunnel, len(records))

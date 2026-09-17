@@ -30,6 +30,17 @@ func main() {
 	}
 	defer zapLogger.Sync()
 
+	// Tolak berjalan tanpa root. Semua operasi runtime (ip netns, wg, iptables,
+	// menulis /etc/ppp dan /etc/ipsec.*) butuh root; tanpa itu setiap
+	// pemeriksaan "namespace ada?" gagal dengan "Operation not permitted" dan
+	// Reconcile menandai SELURUH tunnel sebagai error di database bersama —
+	// persis insiden 2026-09-17 14:46 UTC ketika binary dijalankan tanpa sudo
+	// dari sesi lain sementara service systemd yang sah tetap berjalan.
+	if os.Geteuid() != 0 {
+		zapLogger.Fatal("jinom-vpn must run as root (ip netns / wireguard / iptables). " +
+			"Use `sudo ./bin/jinom-vpn` or the systemd unit — refusing to start so the shared database is not poisoned.")
+	}
+
 	// FIX: Fail-fast if API_KEY is not configured. This prevents the server
 	// from running with an empty API key, which would bypass all authentication.
 	if cfg.Security.APIKey == "" {
@@ -95,7 +106,7 @@ func main() {
 	//     terhapus oleh pencocokan namespace berawalan;
 	//   - menyapu sisa rule DNAT/SNAT dari desain per-namespace lama, yang
 	//     sebelumnya diulang pada setiap Setup dan Teardown.
-	if tunnels, err := tunnelRepo.FindActiveOrDown(context.Background()); err != nil {
+	if tunnels, err := tunnelRepo.FindMonitored(context.Background()); err != nil {
 		zapLogger.Warn("Startup maintenance skipped: failed to list tunnels", zap.Error(err))
 	} else {
 		if err := l2tpSvc.RebuildChapSecrets(tunnels); err != nil {

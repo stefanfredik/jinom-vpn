@@ -46,7 +46,10 @@ func (s *HealthMonitorService) handleFailure(ctx context.Context, t *tunnel.Rese
 		}
 	}
 
-	if t.Status != tunnel.StatusDown {
+	// Tunnel yang sudah 'error' dibiarkan tetap 'error': last_error-nya adalah
+	// diagnosis (setup/provision gagal) yang lebih berguna daripada
+	// "peer unreachable". Ia hanya keluar dari status itu lewat handleSuccess.
+	if t.Status != tunnel.StatusDown && t.Status != tunnel.StatusError {
 		s.log.Warn("Tunnel marked as down",
 			zap.String("tunnel_id", t.ID.String()),
 			zap.String("namespace", t.Namespace),
@@ -111,10 +114,11 @@ func (s *HealthMonitorService) handleSuccess(ctx context.Context, t *tunnel.Rese
 	}
 	s.mu.Unlock()
 
-	if t.Status == tunnel.StatusDown {
+	if t.Status == tunnel.StatusDown || t.Status == tunnel.StatusError {
 		s.log.Info("Tunnel recovered",
 			zap.String("tunnel_id", t.ID.String()),
 			zap.String("namespace", t.Namespace),
+			zap.String("previous_status", string(t.Status)),
 		)
 		_ = s.repo.UpdateStatus(ctx, t.ID, tunnel.StatusActive, "")
 		_ = s.repo.SaveStatusHistory(ctx, &tunnel.TunnelStatusHistory{

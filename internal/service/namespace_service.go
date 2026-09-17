@@ -1,7 +1,10 @@
 package service
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,9 +46,35 @@ func (s *NamespaceService) Delete(ns string) error {
 	return nil
 }
 
+// netnsDir adalah tempat `ip netns add` membuat handle namespace bernama.
+const netnsDir = "/run/netns"
+
+// Exists melaporkan apakah namespace bernama sudah dibuat.
+//
+// Sebelumnya ini menjalankan `ip netns exec <ns> true`, yang juga gagal ketika
+// proses tidak punya hak (Operation not permitted). Kegagalan itu terbaca
+// sebagai "namespace tidak ada", lalu pemanggil mencoba membuatnya, gagal
+// lagi, dan menandai tunnel error — padahal namespace-nya ada dan sehat.
+// Handle di /run/netns bisa di-stat tanpa hak istimewa, jadi jawabannya
+// benar apa pun privilege proses.
 func (s *NamespaceService) Exists(ns string) bool {
-	err := run("ip", "netns", "exec", ns, "true")
+	_, err := os.Stat(filepath.Join(netnsDir, ns))
 	return err == nil
+}
+
+// isPermissionError mengenali kegagalan karena proses tidak punya hak, bukan
+// karena keadaan sistem. Kegagalan seperti ini tidak boleh dicatat sebagai
+// status error tunnel: yang salah adalah cara prosesnya dijalankan.
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Operation not permitted") ||
+		strings.Contains(msg, "Permission denied")
 }
 
 // ListRoutes mengembalikan prefix tujuan dari tabel route di dalam namespace,

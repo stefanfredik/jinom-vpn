@@ -30,7 +30,9 @@ func (s *TunnelService) Activate(ctx context.Context, id uuid.UUID) error {
 
 	if !s.nsSvc.Exists(t.Namespace) {
 		if err := s.nsSvc.Create(t.Namespace); err != nil {
-			s.setError(ctx, id, err)
+			if !isPermissionError(err) {
+				s.setError(ctx, id, err)
+			}
 			return fmt.Errorf("create namespace: %w", err)
 		}
 	}

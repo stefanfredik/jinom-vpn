@@ -121,7 +121,7 @@ func (s *HealthMonitorService) Forget(id string) {
 }
 
 func (s *HealthMonitorService) checkAllTunnels(ctx context.Context) {
-	tunnels, err := s.repo.FindActiveOrDown(ctx)
+	tunnels, err := s.repo.FindMonitored(ctx)
 	if err != nil {
 		s.log.Error("Failed to fetch tunnels for health check", zap.Error(err))
 		return
